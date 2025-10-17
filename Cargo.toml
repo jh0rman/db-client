@@ -1,5 +1,5 @@
 [package]
-name = "hello_gpui"
+name = "db-client"
 version = "0.1.0"
 edition = "2024"
 
@@ -7,10 +7,11 @@ edition = "2024"
 gpui = { version = "0.2.2" }
 gpui-component = "0.5.0"
 core-text = "=21.0.0"
+rusqlite = { version = "0.32", features = ["bundled"] }
 
 [package.metadata.bundle]
-name = "Hello GPUI"
-identifier = "com.jhorman.hellogpui"
+name = "DB Client"
+identifier = "com.jhorman.dbclient"
 version = "1.0.0"
 copyright = "Copyright Jhorman 2026"
 category = "Productivity"
