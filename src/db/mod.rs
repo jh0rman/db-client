@@ -46,7 +46,33 @@ pub fn get_tables(db_path: &str) -> Result<Vec<String>> {
     Ok(tables)
 }
 
-/// Phase 3: Returns the first 100 rows of `table` as strings.
-pub fn get_table_data(_db_path: &str, _table: &str) -> Result<TableData> {
-    unimplemented!("Phase 3")
+/// Returns up to 100 rows from `table`. All cell values are converted to String.
+pub fn get_table_data(db_path: &str, table: &str) -> Result<TableData> {
+    let conn = Connection::open(db_path)?;
+    let query = format!("SELECT * FROM \"{}\" LIMIT 100", table);
+    let mut stmt = conn.prepare(&query)?;
+
+    let col_count = stmt.column_count();
+    let columns: Vec<String> = stmt.column_names().into_iter().map(str::to_string).collect();
+
+    let rows = stmt
+        .query_map([], |row| {
+            let cells = (0..col_count)
+                .map(|i| {
+                    use rusqlite::types::Value;
+                    let val: Value = row.get(i)?;
+                    Ok(match val {
+                        Value::Null => String::new(),
+                        Value::Integer(n) => n.to_string(),
+                        Value::Real(f) => format!("{:.4}", f),
+                        Value::Text(s) => s,
+                        Value::Blob(b) => format!("<blob {} bytes>", b.len()),
+                    })
+                })
+                .collect::<Result<Vec<String>>>()?;
+            Ok(cells)
+        })?
+        .collect::<Result<Vec<Vec<String>>>>()?;
+
+    Ok(TableData { columns, rows })
 }

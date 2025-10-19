@@ -10,11 +10,18 @@ use state::AppState;
 // Path to the SQLite database (hardcoded for MVP).
 const DB_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/test.db");
 
+// Column width for every cell in the data grid.
+const CELL_W: f32 = 160.0;
+// Row height for header and data rows.
+const ROW_H: f32 = 36.0;
+
 // ─── Color palette ───────────────────────────────────────────────────────────
 const BG_APP: u32 = 0x0f1117;
 const BG_SIDEBAR: u32 = 0x161b22;
 const BG_PANEL: u32 = 0x0d1117;
 const BG_ACTIVE: u32 = 0x1c2333;
+const BG_HEADER: u32 = 0x161b22;
+const BG_ROW_ALT: u32 = 0x0d1117;
 const BORDER: u32 = 0x21262d;
 const TEXT_MUTED: u32 = 0x484f58;
 const TEXT_SECONDARY: u32 = 0x7d8590;
@@ -28,10 +35,8 @@ struct AppRoot {
 
 impl AppRoot {
     fn new() -> Self {
-        // Seed a test database if it doesn't exist, then load the table list.
         let _ = db::seed_test_db(DB_PATH);
         let tables = db::get_tables(DB_PATH).unwrap_or_default();
-
         Self {
             state: AppState {
                 db_path: Some(DB_PATH.to_string()),
@@ -43,15 +48,15 @@ impl AppRoot {
     }
 
     fn render_sidebar(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        // Build one click listener per table before constructing the element tree.
         let table_listeners: Vec<_> = self
             .state
             .tables
             .iter()
-            .enumerate()
-            .map(|(_, table)| {
+            .map(|table| {
                 let name = table.clone();
                 cx.listener(move |this, _: &ClickEvent, _, cx| {
+                    // Load data for the selected table and update state.
+                    this.state.table_data = db::get_table_data(DB_PATH, &name).ok();
                     this.state.active_table = Some(name.clone());
                     cx.notify();
                 })
@@ -69,7 +74,6 @@ impl AppRoot {
             .bg(rgb(BG_SIDEBAR))
             .border_r_1()
             .border_color(rgb(BORDER))
-            // ── Sidebar header
             .child(
                 div()
                     .px_4()
@@ -80,7 +84,6 @@ impl AppRoot {
                     .text_color(rgb(TEXT_SECONDARY))
                     .child("TABLES"),
             )
-            // ── Table list
             .child(
                 div()
                     .flex_1()
@@ -104,8 +107,7 @@ impl AppRoot {
                                     .cursor_pointer()
                                     .text_sm()
                                     .when(is_active, |el| {
-                                        el.bg(rgb(BG_ACTIVE))
-                                            .text_color(rgb(ACCENT))
+                                        el.bg(rgb(BG_ACTIVE)).text_color(rgb(ACCENT))
                                     })
                                     .when(!is_active, |el| el.text_color(rgb(TEXT_PRIMARY)))
                                     .on_click(on_click)
@@ -115,11 +117,27 @@ impl AppRoot {
             )
     }
 
-    fn render_main_panel(active_table: Option<String>) -> impl IntoElement {
+    fn render_main_panel(
+        active_table: Option<String>,
+        table_data: Option<(Vec<String>, Vec<Vec<String>>)>,
+    ) -> impl IntoElement {
         let title = active_table
             .as_deref()
             .unwrap_or("Select a table to view data")
             .to_string();
+
+        let content = if let Some((columns, rows)) = table_data {
+            Self::render_data_grid(columns, rows)
+        } else {
+            div()
+                .flex_1()
+                .flex()
+                .justify_center()
+                .items_center()
+                .text_sm()
+                .text_color(rgb(TEXT_MUTED))
+                .child("No table selected")
+        };
 
         div()
             .flex_1()
@@ -127,7 +145,6 @@ impl AppRoot {
             .flex()
             .flex_col()
             .bg(rgb(BG_PANEL))
-            // ── Toolbar / breadcrumb bar
             .child(
                 div()
                     .px_4()
@@ -138,26 +155,100 @@ impl AppRoot {
                     .text_color(rgb(TEXT_SECONDARY))
                     .child(title),
             )
-            // ── Content area (Phase 3: data grid goes here)
+            .child(content)
+    }
+
+    fn render_data_grid(columns: Vec<String>, rows: Vec<Vec<String>>) -> gpui::Div {
+        let row_count = rows.len();
+
+        div()
+            .flex_1()
+            .flex()
+            .flex_col()
+            .overflow_hidden()
+            // ── Header row
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .flex_shrink_0()
+                    .h(px(ROW_H))
+                    .bg(rgb(BG_HEADER))
+                    .border_b_1()
+                    .border_color(rgb(BORDER))
+                    .children(columns.iter().map(|col| {
+                        div()
+                            .w(px(CELL_W))
+                            .flex_shrink_0()
+                            .h_full()
+                            .flex()
+                            .items_center()
+                            .px_3()
+                            .border_r_1()
+                            .border_color(rgb(BORDER))
+                            .text_xs()
+                            .text_color(rgb(TEXT_SECONDARY))
+                            .child(col.to_uppercase())
+                    })),
+            )
+            // ── Data rows
             .child(
                 div()
                     .flex_1()
                     .flex()
-                    .justify_center()
-                    .items_center()
-                    .text_sm()
+                    .flex_col()
+                    .overflow_hidden()
+                    .children(rows.into_iter().enumerate().map(|(row_idx, cells)| {
+                        let is_alt = row_idx % 2 == 1;
+                        div()
+                            .flex()
+                            .flex_row()
+                            .flex_shrink_0()
+                            .h(px(ROW_H))
+                            .border_b_1()
+                            .border_color(rgb(BORDER))
+                            .when(is_alt, |el| el.bg(rgb(BG_ROW_ALT)))
+                            .children(cells.into_iter().map(|cell| {
+                                div()
+                                    .w(px(CELL_W))
+                                    .flex_shrink_0()
+                                    .h_full()
+                                    .flex()
+                                    .items_center()
+                                    .px_3()
+                                    .border_r_1()
+                                    .border_color(rgb(BORDER))
+                                    .text_sm()
+                                    .text_color(rgb(TEXT_PRIMARY))
+                                    .child(cell)
+                            }))
+                    })),
+            )
+            // ── Row count footer
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .px_4()
+                    .py_2()
+                    .border_t_1()
+                    .border_color(rgb(BORDER))
+                    .text_xs()
                     .text_color(rgb(TEXT_MUTED))
-                    .child("Data grid coming in Phase 3"),
+                    .child(format!("{} row{}", row_count, if row_count == 1 { "" } else { "s" })),
             )
     }
 }
 
 impl Render for AppRoot {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // Extract owned data for the panel before the mutable borrow in render_sidebar.
         let active_table = self.state.active_table.clone();
+        let table_data = self
+            .state
+            .table_data
+            .as_ref()
+            .map(|d| (d.columns.clone(), d.rows.clone()));
         let sidebar = self.render_sidebar(cx);
-        let panel = Self::render_main_panel(active_table);
+        let panel = Self::render_main_panel(active_table, table_data);
 
         div()
             .flex()
