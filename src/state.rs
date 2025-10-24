@@ -1,25 +1,52 @@
-/// Holds the raw data for a queried table: column names and rows.
-/// All cell values are stored as Strings for simple rendering in Phase 1.
+use crate::db::DbDriver;
+
+// ─── Table data ───────────────────────────────────────────────────────────────
+
 pub struct TableData {
     pub columns: Vec<String>,
     pub rows: Vec<Vec<String>>,
 }
 
-/// Global application state passed down to UI components.
+// ─── Connection ───────────────────────────────────────────────────────────────
+
+#[derive(PartialEq, Eq)]
+pub enum ConnectionStatus {
+    Disconnected,
+    Connecting,
+    Connected,
+}
+
+pub struct ConnectionConfig {
+    pub host: String,
+    pub port: String,
+    pub user: String,
+    pub password: String,
+    pub database: String,
+}
+
+// ─── App state ────────────────────────────────────────────────────────────────
+
 pub struct AppState {
-    pub db_path: Option<String>,
+    pub connection_status: ConnectionStatus,
+    pub driver: Option<Box<dyn DbDriver>>,
+    pub sql_query: String,
+    // Main view
     pub tables: Vec<String>,
     pub active_table: Option<String>,
     pub table_data: Option<TableData>,
+    pub query_error: Option<String>,
 }
 
 impl AppState {
     pub fn new() -> Self {
         Self {
-            db_path: None,
+            connection_status: ConnectionStatus::Disconnected,
+            driver: None,
+            sql_query: String::new(),
             tables: Vec::new(),
             active_table: None,
             table_data: None,
+            query_error: None,
         }
     }
 }

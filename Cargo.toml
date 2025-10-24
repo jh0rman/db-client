@@ -8,6 +8,7 @@ gpui = { version = "0.2.2" }
 gpui-component = "0.5.0"
 core-text = "=21.0.0"
 rusqlite = { version = "0.32", features = ["bundled"] }
+futures = "0.3"
 
 [package.metadata.bundle]
 name = "DB Client"

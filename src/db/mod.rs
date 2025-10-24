@@ -1,8 +1,59 @@
-use rusqlite::{Connection, Result};
-use crate::state::TableData;
+use rusqlite::Connection;
 
-/// Creates a sample SQLite database at `db_path` with test tables if it doesn't exist.
-pub fn seed_test_db(db_path: &str) -> Result<()> {
+// ─── Shared types ─────────────────────────────────────────────────────────────
+
+#[derive(Debug)]
+pub struct DbError(pub String);
+
+impl std::fmt::Display for DbError {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl From<rusqlite::Error> for DbError {
+    fn from(e: rusqlite::Error) -> Self {
+        DbError(e.to_string())
+    }
+}
+
+// ─── Driver trait ─────────────────────────────────────────────────────────────
+
+/// Common interface implemented by every database backend.
+pub trait DbDriver: Send + Sync {
+    fn get_tables(&self) -> Result<Vec<String>, DbError>;
+    fn execute_query(&self, query: &str) -> Result<crate::state::TableData, DbError>;
+}
+
+// ─── Mock driver (Phase 1) ────────────────────────────────────────────────────
+
+pub struct MockDriver;
+
+impl DbDriver for MockDriver {
+    fn get_tables(&self) -> Result<Vec<String>, DbError> {
+        Ok(vec![
+            "mock_orders".to_string(),
+            "mock_products".to_string(),
+            "mock_users".to_string(),
+        ])
+    }
+
+    fn execute_query(&self, _query: &str) -> Result<crate::state::TableData, DbError> {
+        use crate::state::TableData;
+        Ok(TableData {
+            columns: vec!["id".to_string(), "name".to_string(), "status".to_string()],
+            rows: vec![
+                vec!["1".to_string(), "Alice".to_string(), "active".to_string()],
+                vec!["2".to_string(), "Bob".to_string(), "inactive".to_string()],
+                vec!["3".to_string(), "Carol".to_string(), "active".to_string()],
+            ],
+        })
+    }
+}
+
+// ─── SQLite helpers (kept from v1, Phase 2 will wrap in SqliteDriver) ─────────
+
+pub fn seed_test_db(db_path: &str) -> Result<(), rusqlite::Error> {
     let conn = Connection::open(db_path)?;
     conn.execute_batch("
         CREATE TABLE IF NOT EXISTS users (
@@ -34,20 +85,18 @@ pub fn seed_test_db(db_path: &str) -> Result<()> {
     Ok(())
 }
 
-/// Returns the names of all tables and views in the database, sorted alphabetically.
-pub fn get_tables(db_path: &str) -> Result<Vec<String>> {
+pub fn get_tables(db_path: &str) -> Result<Vec<String>, rusqlite::Error> {
     let conn = Connection::open(db_path)?;
     let mut stmt = conn.prepare(
         "SELECT name FROM sqlite_master WHERE type IN ('table','view') ORDER BY name",
     )?;
     let tables = stmt
         .query_map([], |row| row.get(0))?
-        .collect::<Result<Vec<String>>>()?;
+        .collect::<Result<Vec<String>, _>>()?;
     Ok(tables)
 }
 
-/// Returns up to 100 rows from `table`. All cell values are converted to String.
-pub fn get_table_data(db_path: &str, table: &str) -> Result<TableData> {
+pub fn get_table_data(db_path: &str, table: &str) -> Result<crate::state::TableData, rusqlite::Error> {
     let conn = Connection::open(db_path)?;
     let query = format!("SELECT * FROM \"{}\" LIMIT 100", table);
     let mut stmt = conn.prepare(&query)?;
@@ -69,10 +118,10 @@ pub fn get_table_data(db_path: &str, table: &str) -> Result<TableData> {
                         Value::Blob(b) => format!("<blob {} bytes>", b.len()),
                     })
                 })
-                .collect::<Result<Vec<String>>>()?;
+                .collect::<rusqlite::Result<Vec<String>>>()?;
             Ok(cells)
         })?
-        .collect::<Result<Vec<Vec<String>>>>()?;
+        .collect::<Result<Vec<Vec<String>>, _>>()?;
 
-    Ok(TableData { columns, rows })
+    Ok(crate::state::TableData { columns, rows })
 }

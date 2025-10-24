@@ -2,17 +2,17 @@ mod db;
 mod state;
 
 use gpui::{
-    div, prelude::*, px, rgb, size, App, Application, Bounds, ClickEvent, Context, Window,
-    WindowBounds, WindowOptions,
+    div, prelude::*, px, rgb, size, App, Application, Bounds, ClickEvent, Context, TitlebarOptions,
+    Window, WindowBounds, WindowOptions, point,
 };
-use state::AppState;
+use gpui_component::{
+    Root,
+    input::{Input, InputState},
+};
+use db::DbDriver;
+use state::{AppState, ConnectionStatus};
 
-// Path to the SQLite database (hardcoded for MVP).
-const DB_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/test.db");
-
-// Column width for every cell in the data grid.
 const CELL_W: f32 = 160.0;
-// Row height for header and data rows.
 const ROW_H: f32 = 36.0;
 
 // ─── Color palette ───────────────────────────────────────────────────────────
@@ -21,31 +21,218 @@ const BG_SIDEBAR: u32 = 0x161b22;
 const BG_PANEL: u32 = 0x0d1117;
 const BG_ACTIVE: u32 = 0x1c2333;
 const BG_HEADER: u32 = 0x161b22;
-const BG_ROW_ALT: u32 = 0x0d1117;
+const BG_CARD: u32 = 0x161b22;
 const BORDER: u32 = 0x21262d;
 const TEXT_MUTED: u32 = 0x484f58;
 const TEXT_SECONDARY: u32 = 0x7d8590;
 const TEXT_PRIMARY: u32 = 0xcdd9e5;
 const ACCENT: u32 = 0x388bfd;
+const ACCENT_BG: u32 = 0x1f3458;
 
 // ─── Root component ──────────────────────────────────────────────────────────
+
 struct AppRoot {
     state: AppState,
+    // Connection form input states
+    host_input: gpui::Entity<InputState>,
+    port_input: gpui::Entity<InputState>,
+    user_input: gpui::Entity<InputState>,
+    password_input: gpui::Entity<InputState>,
+    db_input: gpui::Entity<InputState>,
 }
 
 impl AppRoot {
-    fn new() -> Self {
-        let _ = db::seed_test_db(DB_PATH);
-        let tables = db::get_tables(DB_PATH).unwrap_or_default();
+    fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let host_input = cx.new(|cx| InputState::new(window, cx).placeholder("localhost"));
+        let port_input = cx.new(|cx| InputState::new(window, cx).placeholder("5432"));
+        let user_input = cx.new(|cx| InputState::new(window, cx).placeholder("postgres"));
+        let password_input = cx.new(|cx| InputState::new(window, cx).placeholder("password"));
+        let db_input = cx.new(|cx| InputState::new(window, cx).placeholder("mydb"));
+
         Self {
-            state: AppState {
-                db_path: Some(DB_PATH.to_string()),
-                tables,
-                active_table: None,
-                table_data: None,
-            },
+            state: AppState::new(),
+            host_input,
+            port_input,
+            user_input,
+            password_input,
+            db_input,
         }
     }
+
+    // ── Connection screen ─────────────────────────────────────────────────────
+
+    fn render_connection_screen(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let is_connecting = self.state.connection_status == ConnectionStatus::Connecting;
+
+        let on_connect = cx.listener(move |this, _: &ClickEvent, _, cx| {
+            if this.state.connection_status == ConnectionStatus::Connecting {
+                return;
+            }
+            this.state.connection_status = ConnectionStatus::Connecting;
+            cx.notify();
+
+            // Simulate a 1-second connection delay, then transition to Connected.
+            cx.spawn(async move |this, async_cx| {
+                let (tx, rx) = futures::channel::oneshot::channel::<()>();
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_secs(1));
+                    let _ = tx.send(());
+                });
+                let _ = rx.await;
+
+                this.update(async_cx, |model, cx| {
+                    let driver = db::MockDriver;
+                    model.state.tables = driver.get_tables().unwrap_or_default();
+                    model.state.driver = Some(Box::new(driver));
+                    model.state.connection_status = ConnectionStatus::Connected;
+                    cx.notify();
+                })
+                .ok();
+            })
+            .detach();
+        });
+
+        div()
+            .flex_1()
+            .flex()
+            .justify_center()
+            .items_center()
+            .bg(rgb(BG_APP))
+            .child(
+                div()
+                    .w(px(420.0))
+                    .flex()
+                    .flex_col()
+                    .gap_6()
+                    .p_8()
+                    .rounded_lg()
+                    .bg(rgb(BG_CARD))
+                    .border_1()
+                    .border_color(rgb(BORDER))
+                    // ── Title
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .text_xl()
+                                    .text_color(rgb(TEXT_PRIMARY))
+                                    .child("DB Client"),
+                            )
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(rgb(TEXT_SECONDARY))
+                                    .child("Connect to a database"),
+                            ),
+                    )
+                    // ── Host + Port row
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .gap_3()
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_1()
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(rgb(TEXT_SECONDARY))
+                                            .child("HOST"),
+                                    )
+                                    .child(Input::new(&self.host_input)),
+                            )
+                            .child(
+                                div()
+                                    .w(px(90.0))
+                                    .flex()
+                                    .flex_col()
+                                    .gap_1()
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(rgb(TEXT_SECONDARY))
+                                            .child("PORT"),
+                                    )
+                                    .child(Input::new(&self.port_input)),
+                            ),
+                    )
+                    // ── User
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(TEXT_SECONDARY))
+                                    .child("USER"),
+                            )
+                            .child(Input::new(&self.user_input)),
+                    )
+                    // ── Password
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(TEXT_SECONDARY))
+                                    .child("PASSWORD"),
+                            )
+                            .child(Input::new(&self.password_input)),
+                    )
+                    // ── Database
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(TEXT_SECONDARY))
+                                    .child("DATABASE"),
+                            )
+                            .child(Input::new(&self.db_input)),
+                    )
+                    // ── Connect button
+                    .child(
+                        div()
+                            .id("btn-connect")
+                            .w_full()
+                            .h(px(38.0))
+                            .flex()
+                            .justify_center()
+                            .items_center()
+                            .rounded_md()
+                            .cursor_pointer()
+                            .bg(rgb(ACCENT_BG))
+                            .border_1()
+                            .border_color(rgb(ACCENT))
+                            .text_sm()
+                            .text_color(rgb(ACCENT))
+                            .when(is_connecting, |el| {
+                                el.text_color(rgb(TEXT_MUTED))
+                                    .border_color(rgb(BORDER))
+                                    .bg(rgb(BG_CARD))
+                            })
+                            .on_click(on_connect)
+                            .child(if is_connecting { "Connecting…" } else { "Connect" }),
+                    ),
+            )
+    }
+
+    // ── Main view (sidebar + panel) ───────────────────────────────────────────
 
     fn render_sidebar(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let table_listeners: Vec<_> = self
@@ -55,8 +242,14 @@ impl AppRoot {
             .map(|table| {
                 let name = table.clone();
                 cx.listener(move |this, _: &ClickEvent, _, cx| {
-                    // Load data for the selected table and update state.
-                    this.state.table_data = db::get_table_data(DB_PATH, &name).ok();
+                    this.state.table_data = this
+                        .state
+                        .driver
+                        .as_ref()
+                        .and_then(|d| {
+                            d.execute_query(&format!("SELECT * FROM \"{}\" LIMIT 100", name))
+                                .ok()
+                        });
                     this.state.active_table = Some(name.clone());
                     cx.notify();
                 })
@@ -120,7 +313,7 @@ impl AppRoot {
     fn render_main_panel(
         active_table: Option<String>,
         table_data: Option<(Vec<String>, Vec<Vec<String>>)>,
-    ) -> impl IntoElement {
+    ) -> gpui::Div {
         let title = active_table
             .as_deref()
             .unwrap_or("Select a table to view data")
@@ -166,7 +359,6 @@ impl AppRoot {
             .flex()
             .flex_col()
             .overflow_hidden()
-            // ── Header row
             .child(
                 div()
                     .flex()
@@ -191,7 +383,6 @@ impl AppRoot {
                             .child(col.to_uppercase())
                     })),
             )
-            // ── Data rows
             .child(
                 div()
                     .flex_1()
@@ -207,7 +398,7 @@ impl AppRoot {
                             .h(px(ROW_H))
                             .border_b_1()
                             .border_color(rgb(BORDER))
-                            .when(is_alt, |el| el.bg(rgb(BG_ROW_ALT)))
+                            .when(is_alt, |el| el.bg(rgb(BG_HEADER)))
                             .children(cells.into_iter().map(|cell| {
                                 div()
                                     .w(px(CELL_W))
@@ -224,7 +415,6 @@ impl AppRoot {
                             }))
                     })),
             )
-            // ── Row count footer
             .child(
                 div()
                     .flex_shrink_0()
@@ -234,42 +424,59 @@ impl AppRoot {
                     .border_color(rgb(BORDER))
                     .text_xs()
                     .text_color(rgb(TEXT_MUTED))
-                    .child(format!("{} row{}", row_count, if row_count == 1 { "" } else { "s" })),
+                    .child(format!(
+                        "{} row{}",
+                        row_count,
+                        if row_count == 1 { "" } else { "s" }
+                    )),
             )
     }
 }
 
 impl Render for AppRoot {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let active_table = self.state.active_table.clone();
-        let table_data = self
-            .state
-            .table_data
-            .as_ref()
-            .map(|d| (d.columns.clone(), d.rows.clone()));
-        let sidebar = self.render_sidebar(cx);
-        let panel = Self::render_main_panel(active_table, table_data);
+        let root = div().flex().w_full().h_full().bg(rgb(BG_APP));
 
-        div()
-            .flex()
-            .w_full()
-            .h_full()
-            .bg(rgb(BG_APP))
-            .child(sidebar)
-            .child(panel)
+        match self.state.connection_status {
+            ConnectionStatus::Disconnected | ConnectionStatus::Connecting => {
+                root.child(self.render_connection_screen(cx))
+            }
+            ConnectionStatus::Connected => {
+                let active_table = self.state.active_table.clone();
+                let table_data = self
+                    .state
+                    .table_data
+                    .as_ref()
+                    .map(|d| (d.columns.clone(), d.rows.clone()));
+                let sidebar = self.render_sidebar(cx);
+                let panel = Self::render_main_panel(active_table, table_data);
+                root.child(sidebar).child(panel)
+            }
+        }
     }
 }
 
 // ─── Entry point ─────────────────────────────────────────────────────────────
+
 fn main() {
     Application::new().run(|cx: &mut App| {
+        gpui_component::init(cx);
+
         let bounds = Bounds::centered(None, size(px(1200.0), px(800.0)), cx);
         cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
+                titlebar: Some(TitlebarOptions {
+                    title: None,
+                    appears_transparent: true,
+                    traffic_light_position: Some(point(px(12.0), px(12.0))),
+                }),
                 ..Default::default()
             },
-            |_, cx| cx.new(|_| AppRoot::new()),
+            |window, cx| {
+                let app_root = cx.new(|cx| AppRoot::new(window, cx));
+                cx.new(|cx| Root::new(app_root, window, cx))
+            },
         )
         .unwrap();
     });

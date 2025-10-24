@@ -1259,6 +1259,7 @@ name = "db-client"
 version = "0.1.0"
 dependencies = [
  "core-text",
+ "futures",
  "gpui",
  "gpui-component",
  "rusqlite",
