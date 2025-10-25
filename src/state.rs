@@ -35,6 +35,7 @@ pub struct AppState {
     pub active_table: Option<String>,
     pub table_data: Option<TableData>,
     pub query_error: Option<String>,
+    pub connection_error: Option<String>,
 }
 
 impl AppState {
@@ -47,6 +48,7 @@ impl AppState {
             active_table: None,
             table_data: None,
             query_error: None,
+            connection_error: None,
         }
     }
 }

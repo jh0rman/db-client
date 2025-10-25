@@ -1,3 +1,5 @@
+pub mod postgres;
+
 use rusqlite::Connection;
 
 // ─── Shared types ─────────────────────────────────────────────────────────────

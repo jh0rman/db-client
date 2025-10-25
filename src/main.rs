@@ -63,31 +63,64 @@ impl AppRoot {
 
     fn render_connection_screen(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let is_connecting = self.state.connection_status == ConnectionStatus::Connecting;
+        let conn_error = self.state.connection_error.clone();
 
-        let on_connect = cx.listener(move |this, _: &ClickEvent, _, cx| {
+        let on_connect = cx.listener(|this, _: &ClickEvent, _, cx| {
             if this.state.connection_status == ConnectionStatus::Connecting {
                 return;
             }
+            // Read form values before entering the async closure.
+            let host = this.host_input.read(cx).value().to_string();
+            let port = this.port_input.read(cx).value().to_string();
+            let user = this.user_input.read(cx).value().to_string();
+            let password = this.password_input.read(cx).value().to_string();
+            let database = this.db_input.read(cx).value().to_string();
+
             this.state.connection_status = ConnectionStatus::Connecting;
+            this.state.connection_error = None;
             cx.notify();
 
-            // Simulate a 1-second connection delay, then transition to Connected.
             cx.spawn(async move |this, async_cx| {
-                let (tx, rx) = futures::channel::oneshot::channel::<()>();
+                // Run the blocking Postgres connect on a background thread.
+                let (tx, rx) = futures::channel::oneshot::channel::<Result<Box<dyn DbDriver>, String>>();
                 std::thread::spawn(move || {
-                    std::thread::sleep(std::time::Duration::from_secs(1));
-                    let _ = tx.send(());
+                    let result = db::postgres::PostgresDriver::connect(
+                        &host, &port, &user, &password, &database,
+                    )
+                    .map(|d| Box::new(d) as Box<dyn DbDriver>)
+                    .map_err(|e| e.to_string());
+                    let _ = tx.send(result);
                 });
-                let _ = rx.await;
 
-                this.update(async_cx, |model, cx| {
-                    let driver = db::MockDriver;
-                    model.state.tables = driver.get_tables().unwrap_or_default();
-                    model.state.driver = Some(Box::new(driver));
-                    model.state.connection_status = ConnectionStatus::Connected;
-                    cx.notify();
-                })
-                .ok();
+                match rx.await {
+                    Ok(Ok(driver)) => {
+                        this.update(async_cx, |model, cx| {
+                            model.state.tables =
+                                driver.get_tables().unwrap_or_default();
+                            model.state.driver = Some(driver);
+                            model.state.connection_status = ConnectionStatus::Connected;
+                            cx.notify();
+                        })
+                        .ok();
+                    }
+                    Ok(Err(err)) => {
+                        this.update(async_cx, |model, cx| {
+                            model.state.connection_status = ConnectionStatus::Disconnected;
+                            model.state.connection_error = Some(err);
+                            cx.notify();
+                        })
+                        .ok();
+                    }
+                    Err(_) => {
+                        this.update(async_cx, |model, cx| {
+                            model.state.connection_status = ConnectionStatus::Disconnected;
+                            model.state.connection_error =
+                                Some("Connection thread failed".to_string());
+                            cx.notify();
+                        })
+                        .ok();
+                    }
+                }
             })
             .detach();
         });
@@ -205,6 +238,21 @@ impl AppRoot {
                             )
                             .child(Input::new(&self.db_input)),
                     )
+                    // ── Connection error (shown only on failure)
+                    .when_some(conn_error, |el, err| {
+                        el.child(
+                            div()
+                                .px_3()
+                                .py_2()
+                                .rounded_md()
+                                .bg(rgb(0x2d1515))
+                                .border_1()
+                                .border_color(rgb(0x6e1b1b))
+                                .text_xs()
+                                .text_color(rgb(0xff6b6b))
+                                .child(err),
+                        )
+                    })
                     // ── Connect button
                     .child(
                         div()
