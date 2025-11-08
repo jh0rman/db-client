@@ -17,11 +17,15 @@ impl PostgresDriver {
         password: &str,
         database: &str,
     ) -> Result<Self, DbError> {
-        let conn_str = format!(
-            "host={host} port={port} user={user} password={password} dbname={database}"
-        );
-        let client =
-            Client::connect(&conn_str, NoTls).map_err(|e| DbError(e.to_string()))?;
+        let port_u16: u16 = port.parse().unwrap_or(5432);
+
+        let mut config = postgres::Config::new();
+        config.host(host).port(port_u16).user(user).dbname(database);
+        if !password.is_empty() {
+            config.password(password);
+        }
+
+        let client = config.connect(NoTls).map_err(|e| DbError(e.to_string()))?;
         Ok(Self {
             client: Mutex::new(client),
         })
@@ -33,12 +37,27 @@ impl DbDriver for PostgresDriver {
         let mut client = self.client.lock().unwrap();
         let rows = client
             .query(
-                "SELECT table_name FROM information_schema.tables \
-                 WHERE table_schema = 'public' ORDER BY table_name",
+                "SELECT table_schema, table_name \
+                 FROM information_schema.tables \
+                 WHERE table_schema NOT IN ('pg_catalog','information_schema','pg_toast') \
+                 AND table_type = 'BASE TABLE' \
+                 ORDER BY table_schema, table_name",
                 &[],
             )
             .map_err(|e| DbError(e.to_string()))?;
-        Ok(rows.iter().map(|r| r.get::<_, String>(0)).collect())
+        let tables: Vec<String> = rows
+            .iter()
+            .map(|r| {
+                let schema: String = r.get(0);
+                let table: String = r.get(1);
+                if schema == "public" {
+                    table
+                } else {
+                    format!("{schema}.{table}")
+                }
+            })
+            .collect();
+        Ok(tables)
     }
 
     fn execute_query(&self, query: &str) -> Result<TableData, DbError> {

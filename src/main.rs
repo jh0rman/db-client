@@ -39,15 +39,20 @@ struct AppRoot {
     user_input: gpui::Entity<InputState>,
     password_input: gpui::Entity<InputState>,
     db_input: gpui::Entity<InputState>,
+    // SQL editor
+    sql_input: gpui::Entity<InputState>,
 }
 
 impl AppRoot {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let host_input = cx.new(|cx| InputState::new(window, cx).placeholder("localhost"));
-        let port_input = cx.new(|cx| InputState::new(window, cx).placeholder("5432"));
+        let host_input = cx.new(|cx| InputState::new(window, cx).default_value("localhost"));
+        let port_input = cx.new(|cx| InputState::new(window, cx).default_value("5432"));
         let user_input = cx.new(|cx| InputState::new(window, cx).placeholder("postgres"));
         let password_input = cx.new(|cx| InputState::new(window, cx).placeholder("password"));
         let db_input = cx.new(|cx| InputState::new(window, cx).placeholder("mydb"));
+        let sql_input = cx.new(|cx| {
+            InputState::new(window, cx).placeholder("SELECT * FROM table LIMIT 100")
+        });
 
         Self {
             state: AppState::new(),
@@ -56,6 +61,7 @@ impl AppRoot {
             user_input,
             password_input,
             db_input,
+            sql_input,
         }
     }
 
@@ -95,8 +101,14 @@ impl AppRoot {
                 match rx.await {
                     Ok(Ok(driver)) => {
                         this.update(async_cx, |model, cx| {
-                            model.state.tables =
-                                driver.get_tables().unwrap_or_default();
+                            match driver.get_tables() {
+                                Ok(tables) => model.state.tables = tables,
+                                Err(e) => {
+                                    eprintln!("[db-client] get_tables error: {e}");
+                                    model.state.query_error =
+                                        Some(format!("get_tables: {e}"));
+                                }
+                            }
                             model.state.driver = Some(driver);
                             model.state.connection_status = ConnectionStatus::Connected;
                             cx.notify();
@@ -358,27 +370,35 @@ impl AppRoot {
             )
     }
 
-    fn render_main_panel(
-        active_table: Option<String>,
-        table_data: Option<(Vec<String>, Vec<Vec<String>>)>,
-    ) -> gpui::Div {
-        let title = active_table
-            .as_deref()
-            .unwrap_or("Select a table to view data")
-            .to_string();
+    fn render_main_panel(&mut self, cx: &mut Context<Self>) -> gpui::Div {
+        let on_run = cx.listener(|this, _: &ClickEvent, _, cx| {
+            let query = this.sql_input.read(cx).value().to_string();
+            let trimmed = query.trim().to_string();
+            if trimmed.is_empty() {
+                return;
+            }
+            let result = this.state.driver.as_ref().map(|d| d.execute_query(&trimmed));
+            match result {
+                Some(Ok(data)) => {
+                    this.state.table_data = Some(data);
+                    this.state.query_error = None;
+                    this.state.active_table = None;
+                }
+                Some(Err(e)) => {
+                    this.state.query_error = Some(e.to_string());
+                    this.state.table_data = None;
+                }
+                None => {}
+            }
+            cx.notify();
+        });
 
-        let content = if let Some((columns, rows)) = table_data {
-            Self::render_data_grid(columns, rows)
-        } else {
-            div()
-                .flex_1()
-                .flex()
-                .justify_center()
-                .items_center()
-                .text_sm()
-                .text_color(rgb(TEXT_MUTED))
-                .child("No table selected")
-        };
+        let query_error = self.state.query_error.clone();
+        let table_data = self
+            .state
+            .table_data
+            .as_ref()
+            .map(|d| (d.columns.clone(), d.rows.clone()));
 
         div()
             .flex_1()
@@ -386,17 +406,69 @@ impl AppRoot {
             .flex()
             .flex_col()
             .bg(rgb(BG_PANEL))
+            // ── SQL editor bar
             .child(
                 div()
-                    .px_4()
-                    .py_3()
+                    .flex_shrink_0()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .px_3()
+                    .py_2()
                     .border_b_1()
                     .border_color(rgb(BORDER))
-                    .text_sm()
-                    .text_color(rgb(TEXT_SECONDARY))
-                    .child(title),
+                    .child(div().flex_1().child(Input::new(&self.sql_input)))
+                    .child(
+                        div()
+                            .id("btn-run")
+                            .flex_shrink_0()
+                            .h(px(32.0))
+                            .px_4()
+                            .flex()
+                            .items_center()
+                            .rounded_md()
+                            .cursor_pointer()
+                            .bg(rgb(ACCENT_BG))
+                            .border_1()
+                            .border_color(rgb(ACCENT))
+                            .text_sm()
+                            .text_color(rgb(ACCENT))
+                            .on_click(on_run)
+                            .child("Run"),
+                    ),
             )
-            .child(content)
+            // ── Query error
+            .when_some(query_error, |el, err| {
+                el.child(
+                    div()
+                        .flex_shrink_0()
+                        .px_3()
+                        .py_2()
+                        .mx_3()
+                        .mt_2()
+                        .rounded_md()
+                        .bg(rgb(0x2d1515))
+                        .border_1()
+                        .border_color(rgb(0x6e1b1b))
+                        .text_xs()
+                        .text_color(rgb(0xff6b6b))
+                        .child(err),
+                )
+            })
+            // ── Results grid
+            .child(if let Some((columns, rows)) = table_data {
+                Self::render_data_grid(columns, rows)
+            } else {
+                div()
+                    .flex_1()
+                    .flex()
+                    .justify_center()
+                    .items_center()
+                    .text_sm()
+                    .text_color(rgb(TEXT_MUTED))
+                    .child("Run a query or select a table from the sidebar")
+            })
     }
 
     fn render_data_grid(columns: Vec<String>, rows: Vec<Vec<String>>) -> gpui::Div {
@@ -490,14 +562,8 @@ impl Render for AppRoot {
                 root.child(self.render_connection_screen(cx))
             }
             ConnectionStatus::Connected => {
-                let active_table = self.state.active_table.clone();
-                let table_data = self
-                    .state
-                    .table_data
-                    .as_ref()
-                    .map(|d| (d.columns.clone(), d.rows.clone()));
+                let panel = self.render_main_panel(cx);
                 let sidebar = self.render_sidebar(cx);
-                let panel = Self::render_main_panel(active_table, table_data);
                 root.child(sidebar).child(panel)
             }
         }
