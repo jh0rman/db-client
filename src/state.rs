@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use crate::db::DbDriver;
 
 // ─── Table data ───────────────────────────────────────────────────────────────
@@ -28,7 +29,7 @@ pub struct ConnectionConfig {
 
 pub struct AppState {
     pub connection_status: ConnectionStatus,
-    pub driver: Option<Box<dyn DbDriver>>,
+    pub driver: Option<Arc<dyn DbDriver>>,
     pub sql_query: String,
     // Main view
     pub tables: Vec<String>,
@@ -36,6 +37,7 @@ pub struct AppState {
     pub table_data: Option<TableData>,
     pub query_error: Option<String>,
     pub connection_error: Option<String>,
+    pub query_in_progress: bool,
 }
 
 impl AppState {
@@ -49,6 +51,7 @@ impl AppState {
             table_data: None,
             query_error: None,
             connection_error: None,
+            query_in_progress: false,
         }
     }
 }

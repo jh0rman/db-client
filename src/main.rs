@@ -1,6 +1,8 @@
 mod db;
 mod state;
 
+use std::sync::Arc;
+
 use gpui::{
     div, prelude::*, px, rgb, size, App, Application, Bounds, ClickEvent, Context, TitlebarOptions,
     Window, WindowBounds, WindowOptions, point,
@@ -41,6 +43,8 @@ struct AppRoot {
     db_input: gpui::Entity<InputState>,
     // SQL editor
     sql_input: gpui::Entity<InputState>,
+    // Holds the running query task; dropping it cancels the future
+    query_task: Option<gpui::Task<()>>,
 }
 
 impl AppRoot {
@@ -62,6 +66,7 @@ impl AppRoot {
             password_input,
             db_input,
             sql_input,
+            query_task: None,
         }
     }
 
@@ -88,12 +93,12 @@ impl AppRoot {
 
             cx.spawn(async move |this, async_cx| {
                 // Run the blocking Postgres connect on a background thread.
-                let (tx, rx) = futures::channel::oneshot::channel::<Result<Box<dyn DbDriver>, String>>();
+                let (tx, rx) = futures::channel::oneshot::channel::<Result<Arc<dyn DbDriver>, String>>();
                 std::thread::spawn(move || {
                     let result = db::postgres::PostgresDriver::connect(
                         &host, &port, &user, &password, &database,
                     )
-                    .map(|d| Box::new(d) as Box<dyn DbDriver>)
+                    .map(|d| Arc::new(d) as Arc<dyn DbDriver>)
                     .map_err(|e| e.to_string());
                     let _ = tx.send(result);
                 });
@@ -371,25 +376,64 @@ impl AppRoot {
     }
 
     fn render_main_panel(&mut self, cx: &mut Context<Self>) -> gpui::Div {
+        let is_running = self.state.query_in_progress;
+
         let on_run = cx.listener(|this, _: &ClickEvent, _, cx| {
+            if this.state.query_in_progress {
+                return;
+            }
             let query = this.sql_input.read(cx).value().to_string();
             let trimmed = query.trim().to_string();
             if trimmed.is_empty() {
                 return;
             }
-            let result = this.state.driver.as_ref().map(|d| d.execute_query(&trimmed));
-            match result {
-                Some(Ok(data)) => {
-                    this.state.table_data = Some(data);
-                    this.state.query_error = None;
-                    this.state.active_table = None;
+            let driver = match this.state.driver.clone() {
+                Some(d) => d,
+                None => return,
+            };
+
+            this.state.query_in_progress = true;
+            this.state.query_error = None;
+            cx.notify();
+
+            let task = cx.spawn(async move |this_weak, async_cx| {
+                let (tx, rx) = futures::channel::oneshot::channel::<Result<crate::state::TableData, String>>();
+                std::thread::spawn(move || {
+                    let result = driver.execute_query(&trimmed).map_err(|e| e.to_string());
+                    let _ = tx.send(result);
+                });
+
+                match rx.await {
+                    Ok(Ok(data)) => {
+                        this_weak
+                            .update(async_cx, |model, cx| {
+                                model.state.table_data = Some(data);
+                                model.state.query_error = None;
+                                model.state.active_table = None;
+                                model.state.query_in_progress = false;
+                                cx.notify();
+                            })
+                            .ok();
+                    }
+                    Ok(Err(err)) => {
+                        this_weak
+                            .update(async_cx, |model, cx| {
+                                model.state.query_error = Some(err);
+                                model.state.table_data = None;
+                                model.state.query_in_progress = false;
+                                cx.notify();
+                            })
+                            .ok();
+                    }
+                    Err(_) => {} // future was cancelled by Cancel button — state already reset
                 }
-                Some(Err(e)) => {
-                    this.state.query_error = Some(e.to_string());
-                    this.state.table_data = None;
-                }
-                None => {}
-            }
+            });
+            this.query_task = Some(task);
+        });
+
+        let on_cancel = cx.listener(|this, _: &ClickEvent, _, cx| {
+            this.query_task = None; // dropping the Task cancels the future
+            this.state.query_in_progress = false;
             cx.notify();
         });
 
@@ -419,6 +463,7 @@ impl AppRoot {
                     .border_b_1()
                     .border_color(rgb(BORDER))
                     .child(div().flex_1().child(Input::new(&self.sql_input)))
+                    // Run button — grayed out while a query is in progress
                     .child(
                         div()
                             .id("btn-run")
@@ -428,15 +473,40 @@ impl AppRoot {
                             .flex()
                             .items_center()
                             .rounded_md()
-                            .cursor_pointer()
                             .bg(rgb(ACCENT_BG))
                             .border_1()
                             .border_color(rgb(ACCENT))
                             .text_sm()
                             .text_color(rgb(ACCENT))
-                            .on_click(on_run)
-                            .child("Run"),
-                    ),
+                            .when(!is_running, |el| el.cursor_pointer().on_click(on_run))
+                            .when(is_running, |el| {
+                                el.bg(rgb(BG_CARD))
+                                    .border_color(rgb(BORDER))
+                                    .text_color(rgb(TEXT_MUTED))
+                            })
+                            .child(if is_running { "Running…" } else { "Run" }),
+                    )
+                    // Cancel button — only visible while running
+                    .when(is_running, |el| {
+                        el.child(
+                            div()
+                                .id("btn-cancel")
+                                .flex_shrink_0()
+                                .h(px(32.0))
+                                .px_4()
+                                .flex()
+                                .items_center()
+                                .rounded_md()
+                                .cursor_pointer()
+                                .bg(rgb(BG_CARD))
+                                .border_1()
+                                .border_color(rgb(0x6e1b1b))
+                                .text_sm()
+                                .text_color(rgb(0xff6b6b))
+                                .on_click(on_cancel)
+                                .child("Cancel"),
+                        )
+                    }),
             )
             // ── Query error
             .when_some(query_error, |el, err| {
@@ -456,8 +526,17 @@ impl AppRoot {
                         .child(err),
                 )
             })
-            // ── Results grid
-            .child(if let Some((columns, rows)) = table_data {
+            // ── Results grid (or loading / empty state)
+            .child(if is_running {
+                div()
+                    .flex_1()
+                    .flex()
+                    .justify_center()
+                    .items_center()
+                    .text_sm()
+                    .text_color(rgb(TEXT_SECONDARY))
+                    .child("Running query…")
+            } else if let Some((columns, rows)) = table_data {
                 Self::render_data_grid(columns, rows)
             } else {
                 div()
