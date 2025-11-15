@@ -1,4 +1,4 @@
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use postgres::{Client, NoTls};
 
 use super::{DbDriver, DbError};
@@ -69,7 +69,7 @@ impl DbDriver for PostgresDriver {
         if rows.is_empty() {
             return Ok(TableData {
                 columns: vec![],
-                rows: vec![],
+                rows: Arc::new(vec![]),
             });
         }
 
@@ -79,14 +79,14 @@ impl DbDriver for PostgresDriver {
             .map(|c| c.name().to_string())
             .collect();
 
-        let data_rows = rows
+        let data_rows: Vec<Vec<String>> = rows
             .iter()
             .map(|row| (0..columns.len()).map(|i| pg_value_to_string(row, i)).collect())
             .collect();
 
         Ok(TableData {
             columns,
-            rows: data_rows,
+            rows: Arc::new(data_rows),
         })
     }
 }

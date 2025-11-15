@@ -1,5 +1,6 @@
 pub mod postgres;
 
+use std::sync::Arc;
 use rusqlite::Connection;
 
 // ─── Shared types ─────────────────────────────────────────────────────────────
@@ -44,11 +45,11 @@ impl DbDriver for MockDriver {
         use crate::state::TableData;
         Ok(TableData {
             columns: vec!["id".to_string(), "name".to_string(), "status".to_string()],
-            rows: vec![
+            rows: Arc::new(vec![
                 vec!["1".to_string(), "Alice".to_string(), "active".to_string()],
                 vec!["2".to_string(), "Bob".to_string(), "inactive".to_string()],
                 vec!["3".to_string(), "Carol".to_string(), "active".to_string()],
-            ],
+            ]),
         })
     }
 }
@@ -125,5 +126,5 @@ pub fn get_table_data(db_path: &str, table: &str) -> Result<crate::state::TableD
         })?
         .collect::<Result<Vec<Vec<String>>, _>>()?;
 
-    Ok(crate::state::TableData { columns, rows })
+    Ok(crate::state::TableData { columns, rows: Arc::new(rows) })
 }

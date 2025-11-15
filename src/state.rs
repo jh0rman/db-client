@@ -5,7 +5,9 @@ use crate::db::DbDriver;
 
 pub struct TableData {
     pub columns: Vec<String>,
-    pub rows: Vec<Vec<String>>,
+    /// Wrapped in Arc so the render closure can hold a cheap reference each frame
+    /// without cloning the full dataset.
+    pub rows: Arc<Vec<Vec<String>>>,
 }
 
 // ─── Connection ───────────────────────────────────────────────────────────────

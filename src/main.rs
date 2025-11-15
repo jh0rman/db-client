@@ -4,8 +4,8 @@ mod state;
 use std::sync::Arc;
 
 use gpui::{
-    div, prelude::*, px, rgb, size, App, Application, Bounds, ClickEvent, Context, TitlebarOptions,
-    Window, WindowBounds, WindowOptions, point,
+    div, uniform_list, prelude::*, px, rgb, size, App, Application, Bounds, ClickEvent, Context,
+    TitlebarOptions, Window, WindowBounds, WindowOptions, point,
 };
 use gpui_component::{
     Root,
@@ -387,6 +387,31 @@ impl AppRoot {
             if trimmed.is_empty() {
                 return;
             }
+            // Synthetic dataset for virtualisation stress-test
+            if trimmed.eq_ignore_ascii_case("test 100k") {
+                let columns = vec![
+                    "id".to_string(), "name".to_string(), "value".to_string(),
+                    "status".to_string(), "created_at".to_string(),
+                ];
+                let rows: Vec<Vec<String>> = (0u64..100_000)
+                    .map(|i| vec![
+                        i.to_string(),
+                        format!("Item {i}"),
+                        format!("{:.4}", i as f64 * 1.337),
+                        if i % 3 == 0 { "active" } else { "inactive" }.to_string(),
+                        format!("2024-{:02}-{:02}", (i % 12) + 1, (i % 28) + 1),
+                    ])
+                    .collect();
+                this.state.table_data = Some(crate::state::TableData {
+                    columns,
+                    rows: Arc::new(rows),
+                });
+                this.state.query_error = None;
+                this.state.active_table = None;
+                cx.notify();
+                return;
+            }
+
             let driver = match this.state.driver.clone() {
                 Some(d) => d,
                 None => return,
@@ -442,7 +467,7 @@ impl AppRoot {
             .state
             .table_data
             .as_ref()
-            .map(|d| (d.columns.clone(), d.rows.clone()));
+            .map(|d| (d.columns.clone(), Arc::clone(&d.rows)));
 
         div()
             .flex_1()
@@ -550,14 +575,20 @@ impl AppRoot {
             })
     }
 
-    fn render_data_grid(columns: Vec<String>, rows: Vec<Vec<String>>) -> gpui::Div {
+    fn render_data_grid(columns: Vec<String>, rows: Arc<Vec<Vec<String>>>) -> gpui::Div {
         let row_count = rows.len();
+
+        // Arcs cloned once per render; the uniform_list closure holds them cheaply per frame.
+        let cols_hdr = Arc::new(columns);
+        let cols_list = Arc::clone(&cols_hdr);
+        let rows_list = Arc::clone(&rows);
 
         div()
             .flex_1()
             .flex()
             .flex_col()
             .overflow_hidden()
+            // ── Fixed header (not virtualized)
             .child(
                 div()
                     .flex()
@@ -567,7 +598,7 @@ impl AppRoot {
                     .bg(rgb(BG_HEADER))
                     .border_b_1()
                     .border_color(rgb(BORDER))
-                    .children(columns.iter().map(|col| {
+                    .children(cols_hdr.iter().map(|col| {
                         div()
                             .w(px(CELL_W))
                             .flex_shrink_0()
@@ -582,38 +613,48 @@ impl AppRoot {
                             .child(col.to_uppercase())
                     })),
             )
+            // ── Virtual body: uniform_list only instantiates visible rows each frame
             .child(
-                div()
-                    .flex_1()
-                    .flex()
-                    .flex_col()
-                    .overflow_hidden()
-                    .children(rows.into_iter().enumerate().map(|(row_idx, cells)| {
-                        let is_alt = row_idx % 2 == 1;
-                        div()
-                            .flex()
-                            .flex_row()
-                            .flex_shrink_0()
-                            .h(px(ROW_H))
-                            .border_b_1()
-                            .border_color(rgb(BORDER))
-                            .when(is_alt, |el| el.bg(rgb(BG_HEADER)))
-                            .children(cells.into_iter().map(|cell| {
+                uniform_list(
+                    "grid-rows",
+                    row_count,
+                    move |visible_range, _window, _cx| {
+                        let rows = Arc::clone(&rows_list);
+                        let cols = Arc::clone(&cols_list);
+                        visible_range
+                            .map(|i| {
+                                let is_alt = i % 2 == 1;
                                 div()
-                                    .w(px(CELL_W))
-                                    .flex_shrink_0()
-                                    .h_full()
                                     .flex()
-                                    .items_center()
-                                    .px_3()
-                                    .border_r_1()
+                                    .flex_row()
+                                    .flex_shrink_0()
+                                    .h(px(ROW_H))
+                                    .border_b_1()
                                     .border_color(rgb(BORDER))
-                                    .text_sm()
-                                    .text_color(rgb(TEXT_PRIMARY))
-                                    .child(cell)
-                            }))
-                    })),
+                                    .when(is_alt, |el| el.bg(rgb(BG_HEADER)))
+                                    .children((0..cols.len()).map(|c| {
+                                        let cell: String =
+                                            rows[i].get(c).cloned().unwrap_or_default();
+                                        div()
+                                            .w(px(CELL_W))
+                                            .flex_shrink_0()
+                                            .h_full()
+                                            .flex()
+                                            .items_center()
+                                            .px_3()
+                                            .border_r_1()
+                                            .border_color(rgb(BORDER))
+                                            .text_sm()
+                                            .text_color(rgb(TEXT_PRIMARY))
+                                            .child(cell)
+                                    }))
+                            })
+                            .collect()
+                    },
+                )
+                .flex_1(),
             )
+            // ── Footer: row count
             .child(
                 div()
                     .flex_shrink_0()
