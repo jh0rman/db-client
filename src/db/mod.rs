@@ -25,7 +25,16 @@ impl From<rusqlite::Error> for DbError {
 /// Common interface implemented by every database backend.
 pub trait DbDriver: Send + Sync {
     fn get_tables(&self) -> Result<Vec<String>, DbError>;
+    /// Execute an arbitrary query and return all matching rows.
     fn execute_query(&self, query: &str) -> Result<crate::state::TableData, DbError>;
+    /// Wrap `query` in LIMIT/OFFSET for lazy pagination. Implementations
+    /// use a subquery so the user's own ORDER BY / WHERE clauses are preserved.
+    fn execute_query_paged(
+        &self,
+        query: &str,
+        offset: usize,
+        limit: usize,
+    ) -> Result<crate::state::TableData, DbError>;
 }
 
 // ─── Mock driver (Phase 1) ────────────────────────────────────────────────────
@@ -51,6 +60,16 @@ impl DbDriver for MockDriver {
                 vec!["3".to_string(), "Carol".to_string(), "active".to_string()],
             ]),
         })
+    }
+
+    fn execute_query_paged(
+        &self,
+        _query: &str,
+        _offset: usize,
+        _limit: usize,
+    ) -> Result<crate::state::TableData, DbError> {
+        use crate::state::TableData;
+        Ok(TableData { columns: vec![], rows: Arc::new(vec![]) })
     }
 }
 

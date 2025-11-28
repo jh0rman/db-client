@@ -5,17 +5,19 @@ use std::sync::Arc;
 
 use gpui::{
     div, uniform_list, prelude::*, px, rgb, size, App, Application, Bounds, ClickEvent, Context,
-    TitlebarOptions, Window, WindowBounds, WindowOptions, point,
+    TitlebarOptions, UniformListScrollHandle, Window, WindowBounds, WindowOptions, point,
 };
 use gpui_component::{
     Root,
     input::{Input, InputState},
 };
 use db::DbDriver;
-use state::{AppState, ConnectionStatus};
+use state::{AppState, ConnectionStatus, PagedTableData};
 
 const CELL_W: f32 = 160.0;
 const ROW_H: f32 = 36.0;
+/// Rows fetched per lazy-load request.
+const CHUNK_SIZE: usize = 1_000;
 
 // ─── Color palette ───────────────────────────────────────────────────────────
 const BG_APP: u32 = 0x0f1117;
@@ -45,6 +47,8 @@ struct AppRoot {
     sql_input: gpui::Entity<InputState>,
     // Holds the running query task; dropping it cancels the future
     query_task: Option<gpui::Task<()>>,
+    // Tracks virtual list scroll position for lazy-load trigger
+    scroll_handle: UniformListScrollHandle,
 }
 
 impl AppRoot {
@@ -67,6 +71,7 @@ impl AppRoot {
             db_input,
             sql_input,
             query_task: None,
+            scroll_handle: UniformListScrollHandle::new(),
         }
     }
 
@@ -307,14 +312,22 @@ impl AppRoot {
             .map(|table| {
                 let name = table.clone();
                 cx.listener(move |this, _: &ClickEvent, _, cx| {
-                    this.state.table_data = this
-                        .state
-                        .driver
-                        .as_ref()
-                        .and_then(|d| {
-                            d.execute_query(&format!("SELECT * FROM \"{}\" LIMIT 100", name))
-                                .ok()
+                    let browse_query = format!("SELECT * FROM \"{}\"", name);
+                    let result = this.state.driver.as_ref().and_then(|d| {
+                        d.execute_query_paged(&browse_query, 0, CHUNK_SIZE).ok()
+                    });
+                    if let Some(td) = result {
+                        let all_loaded = td.rows.len() < CHUNK_SIZE;
+                        this.state.results = Some(PagedTableData {
+                            columns: td.columns,
+                            query: browse_query,
+                            rows: td.rows,
+                            chunk_size: CHUNK_SIZE,
+                            all_loaded,
+                            loading_next: false,
                         });
+                        this.state.query_error = None;
+                    }
                     this.state.active_table = Some(name.clone());
                     cx.notify();
                 })
@@ -402,9 +415,13 @@ impl AppRoot {
                         format!("2024-{:02}-{:02}", (i % 12) + 1, (i % 28) + 1),
                     ])
                     .collect();
-                this.state.table_data = Some(crate::state::TableData {
+                this.state.results = Some(PagedTableData {
                     columns,
+                    query: String::new(),
                     rows: Arc::new(rows),
+                    chunk_size: CHUNK_SIZE,
+                    all_loaded: true,
+                    loading_next: false,
                 });
                 this.state.query_error = None;
                 this.state.active_table = None;
@@ -423,8 +440,11 @@ impl AppRoot {
 
             let task = cx.spawn(async move |this_weak, async_cx| {
                 let (tx, rx) = futures::channel::oneshot::channel::<Result<crate::state::TableData, String>>();
+                let trimmed_for_state = trimmed.clone();
                 std::thread::spawn(move || {
-                    let result = driver.execute_query(&trimmed).map_err(|e| e.to_string());
+                    let result = driver
+                        .execute_query_paged(&trimmed, 0, CHUNK_SIZE)
+                        .map_err(|e| e.to_string());
                     let _ = tx.send(result);
                 });
 
@@ -432,7 +452,15 @@ impl AppRoot {
                     Ok(Ok(data)) => {
                         this_weak
                             .update(async_cx, |model, cx| {
-                                model.state.table_data = Some(data);
+                                let all_loaded = data.rows.len() < CHUNK_SIZE;
+                                model.state.results = Some(PagedTableData {
+                                    columns: data.columns,
+                                    query: trimmed_for_state,
+                                    rows: data.rows,
+                                    chunk_size: CHUNK_SIZE,
+                                    all_loaded,
+                                    loading_next: false,
+                                });
                                 model.state.query_error = None;
                                 model.state.active_table = None;
                                 model.state.query_in_progress = false;
@@ -444,7 +472,7 @@ impl AppRoot {
                         this_weak
                             .update(async_cx, |model, cx| {
                                 model.state.query_error = Some(err);
-                                model.state.table_data = None;
+                                model.state.results = None;
                                 model.state.query_in_progress = false;
                                 cx.notify();
                             })
@@ -462,12 +490,24 @@ impl AppRoot {
             cx.notify();
         });
 
+        // ── Lazy-load trigger: if user has scrolled ≥75% of loaded content,
+        //    kick off the next chunk (fires once because loading_next guards re-entry).
+        if let Some(r) = &self.state.results {
+            if !r.all_loaded && !r.loading_next {
+                let scroll_y: f32 = self.scroll_handle.0.borrow().base_handle.offset().y.into();
+                let max_y: f32 = self.scroll_handle.0.borrow().base_handle.max_offset().height.into();
+                // Also load when the list fits entirely in the viewport (max_y ≈ 0)
+                let should_load = max_y < 1.0 || scroll_y / max_y >= 0.75;
+                if should_load {
+                    self.load_next_chunk(cx);
+                }
+            }
+        }
+
         let query_error = self.state.query_error.clone();
-        let table_data = self
-            .state
-            .table_data
-            .as_ref()
-            .map(|d| (d.columns.clone(), Arc::clone(&d.rows)));
+        let results_snapshot = self.state.results.as_ref().map(|r| {
+            (r.columns.clone(), Arc::clone(&r.rows), r.loading_next, r.all_loaded)
+        });
 
         div()
             .flex_1()
@@ -561,8 +601,8 @@ impl AppRoot {
                     .text_sm()
                     .text_color(rgb(TEXT_SECONDARY))
                     .child("Running query…")
-            } else if let Some((columns, rows)) = table_data {
-                Self::render_data_grid(columns, rows)
+            } else if let Some((columns, rows, loading_next, all_loaded)) = results_snapshot {
+                Self::render_data_grid(columns, rows, loading_next, all_loaded, &self.scroll_handle)
             } else {
                 div()
                     .flex_1()
@@ -575,7 +615,73 @@ impl AppRoot {
             })
     }
 
-    fn render_data_grid(columns: Vec<String>, rows: Arc<Vec<Vec<String>>>) -> gpui::Div {
+    /// Loads the next page of rows in the background and appends them to state.results.
+    fn load_next_chunk(&mut self, cx: &mut Context<Self>) {
+        let r = match &mut self.state.results {
+            Some(r) => r,
+            None => return,
+        };
+        r.loading_next = true;
+
+        let driver = match self.state.driver.clone() {
+            Some(d) => d,
+            None => return,
+        };
+        let query = r.query.clone();
+        let offset = r.rows.len();
+        let chunk_size = r.chunk_size;
+
+        cx.spawn(async move |this_weak, async_cx| {
+            let (tx, rx) =
+                futures::channel::oneshot::channel::<Result<crate::state::TableData, String>>();
+            std::thread::spawn(move || {
+                let result = driver
+                    .execute_query_paged(&query, offset, chunk_size)
+                    .map_err(|e| e.to_string());
+                let _ = tx.send(result);
+            });
+
+            match rx.await {
+                Ok(Ok(new_data)) => {
+                    this_weak
+                        .update(async_cx, |model, cx| {
+                            if let Some(r) = &mut model.state.results {
+                                let all_loaded = new_data.rows.len() < chunk_size;
+                                // Extend existing rows with the new chunk (O(n) clone once)
+                                let mut combined = (*r.rows).clone();
+                                combined.extend((*new_data.rows).iter().cloned());
+                                r.rows = Arc::new(combined);
+                                r.all_loaded = all_loaded;
+                                r.loading_next = false;
+                            }
+                            cx.notify();
+                        })
+                        .ok();
+                }
+                _ => {
+                    // On error or cancellation, just stop trying so we don't loop
+                    this_weak
+                        .update(async_cx, |model, cx| {
+                            if let Some(r) = &mut model.state.results {
+                                r.loading_next = false;
+                                r.all_loaded = true;
+                            }
+                            cx.notify();
+                        })
+                        .ok();
+                }
+            }
+        })
+        .detach();
+    }
+
+    fn render_data_grid(
+        columns: Vec<String>,
+        rows: Arc<Vec<Vec<String>>>,
+        loading_next: bool,
+        all_loaded: bool,
+        scroll_handle: &UniformListScrollHandle,
+    ) -> gpui::Div {
         let row_count = rows.len();
 
         // Arcs cloned once per render; the uniform_list closure holds them cheaply per frame.
@@ -652,9 +758,10 @@ impl AppRoot {
                             .collect()
                     },
                 )
+                .track_scroll(scroll_handle.clone())
                 .flex_1(),
             )
-            // ── Footer: row count
+            // ── Footer: row count + lazy-load status
             .child(
                 div()
                     .flex_shrink_0()
@@ -664,11 +771,17 @@ impl AppRoot {
                     .border_color(rgb(BORDER))
                     .text_xs()
                     .text_color(rgb(TEXT_MUTED))
-                    .child(format!(
-                        "{} row{}",
-                        row_count,
-                        if row_count == 1 { "" } else { "s" }
-                    )),
+                    .child(if loading_next {
+                        format!("{row_count} rows — loading more…")
+                    } else if all_loaded {
+                        format!(
+                            "{} row{}",
+                            row_count,
+                            if row_count == 1 { "" } else { "s" }
+                        )
+                    } else {
+                        format!("{row_count} rows — scroll for more")
+                    }),
             )
     }
 }

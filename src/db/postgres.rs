@@ -30,6 +30,37 @@ impl PostgresDriver {
             client: Mutex::new(client),
         })
     }
+
+    /// Shared inner query runner used by both public methods.
+    fn run_query(&self, sql: &str) -> Result<TableData, DbError> {
+        let mut client = self.client.lock().unwrap();
+        let rows = client
+            .query(sql, &[])
+            .map_err(|e| DbError(e.to_string()))?;
+
+        if rows.is_empty() {
+            return Ok(TableData {
+                columns: vec![],
+                rows: Arc::new(vec![]),
+            });
+        }
+
+        let columns: Vec<String> = rows[0]
+            .columns()
+            .iter()
+            .map(|c| c.name().to_string())
+            .collect();
+
+        let data_rows: Vec<Vec<String>> = rows
+            .iter()
+            .map(|row| (0..columns.len()).map(|i| pg_value_to_string(row, i)).collect())
+            .collect();
+
+        Ok(TableData {
+            columns,
+            rows: Arc::new(data_rows),
+        })
+    }
 }
 
 impl DbDriver for PostgresDriver {
@@ -61,33 +92,21 @@ impl DbDriver for PostgresDriver {
     }
 
     fn execute_query(&self, query: &str) -> Result<TableData, DbError> {
-        let mut client = self.client.lock().unwrap();
-        let rows = client
-            .query(query, &[])
-            .map_err(|e| DbError(e.to_string()))?;
+        self.run_query(query)
+    }
 
-        if rows.is_empty() {
-            return Ok(TableData {
-                columns: vec![],
-                rows: Arc::new(vec![]),
-            });
-        }
-
-        let columns: Vec<String> = rows[0]
-            .columns()
-            .iter()
-            .map(|c| c.name().to_string())
-            .collect();
-
-        let data_rows: Vec<Vec<String>> = rows
-            .iter()
-            .map(|row| (0..columns.len()).map(|i| pg_value_to_string(row, i)).collect())
-            .collect();
-
-        Ok(TableData {
-            columns,
-            rows: Arc::new(data_rows),
-        })
+    fn execute_query_paged(
+        &self,
+        query: &str,
+        offset: usize,
+        limit: usize,
+    ) -> Result<TableData, DbError> {
+        // Wrap the user query as a subquery so their ORDER BY / WHERE are preserved,
+        // then apply our pagination envelope on top.
+        let sql = format!(
+            "SELECT * FROM ({query}) AS _paged_q LIMIT {limit} OFFSET {offset}"
+        );
+        self.run_query(&sql)
     }
 }
 

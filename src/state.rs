@@ -3,11 +3,27 @@ use crate::db::DbDriver;
 
 // ─── Table data ───────────────────────────────────────────────────────────────
 
+/// Flat result returned by the driver for a single query or page.
 pub struct TableData {
     pub columns: Vec<String>,
-    /// Wrapped in Arc so the render closure can hold a cheap reference each frame
-    /// without cloning the full dataset.
+    /// Wrapped in Arc so callers can hand it to the render closure cheaply.
     pub rows: Arc<Vec<Vec<String>>>,
+}
+
+// ─── Paged result (used by the UI) ───────────────────────────────────────────
+
+/// All rows loaded so far for the active query, growing as the user scrolls.
+pub struct PagedTableData {
+    pub columns: Vec<String>,
+    /// The bare query (no LIMIT/OFFSET) used to fetch subsequent chunks.
+    pub query: String,
+    /// Accumulated rows across all loaded chunks.
+    pub rows: Arc<Vec<Vec<String>>>,
+    pub chunk_size: usize,
+    /// True when the last chunk came back with fewer rows than chunk_size.
+    pub all_loaded: bool,
+    /// True while a background chunk fetch is in flight.
+    pub loading_next: bool,
 }
 
 // ─── Connection ───────────────────────────────────────────────────────────────
@@ -36,7 +52,7 @@ pub struct AppState {
     // Main view
     pub tables: Vec<String>,
     pub active_table: Option<String>,
-    pub table_data: Option<TableData>,
+    pub results: Option<PagedTableData>,
     pub query_error: Option<String>,
     pub connection_error: Option<String>,
     pub query_in_progress: bool,
@@ -50,7 +66,7 @@ impl AppState {
             sql_query: String::new(),
             tables: Vec::new(),
             active_table: None,
-            table_data: None,
+            results: None,
             query_error: None,
             connection_error: None,
             query_in_progress: false,
