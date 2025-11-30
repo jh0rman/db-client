@@ -1,3 +1,4 @@
+mod connections;
 mod db;
 mod state;
 
@@ -49,6 +50,10 @@ struct AppRoot {
     query_task: Option<gpui::Task<()>>,
     // Tracks virtual list scroll position for lazy-load trigger
     scroll_handle: UniformListScrollHandle,
+    // Persisted connections loaded from ~/.db-client/connections.json
+    saved_connections: Vec<connections::SavedConnection>,
+    // Set by "fill from saved connection" click; applied in render where window is available.
+    pending_fill: Option<[String; 4]>, // [host, port, user, database]
 }
 
 impl AppRoot {
@@ -72,6 +77,8 @@ impl AppRoot {
             sql_input,
             query_task: None,
             scroll_handle: UniformListScrollHandle::new(),
+            saved_connections: connections::load(),
+            pending_fill: None,
         }
     }
 
@@ -80,6 +87,37 @@ impl AppRoot {
     fn render_connection_screen(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let is_connecting = self.state.connection_status == ConnectionStatus::Connecting;
         let conn_error = self.state.connection_error.clone();
+
+        // Build per-saved-connection fill+delete listeners before borrowing self further.
+        let saved_conn_rows: Vec<_> = self
+            .saved_connections
+            .iter()
+            .enumerate()
+            .map(|(idx, conn)| {
+                let host = conn.host.clone();
+                let port = conn.port.clone();
+                let user = conn.user.clone();
+                let database = conn.database.clone();
+                let name = conn.name.clone();
+
+                let on_fill = cx.listener(move |this, _: &ClickEvent, _, cx| {
+                    this.pending_fill = Some([
+                        host.clone(),
+                        port.clone(),
+                        user.clone(),
+                        database.clone(),
+                    ]);
+                    cx.notify();
+                });
+
+                let on_delete = cx.listener(move |this, _: &ClickEvent, _, cx| {
+                    connections::remove(&mut this.saved_connections, idx);
+                    cx.notify();
+                });
+
+                (name, on_fill, on_delete)
+            })
+            .collect();
 
         let on_connect = cx.listener(|this, _: &ClickEvent, _, cx| {
             if this.state.connection_status == ConnectionStatus::Connecting {
@@ -91,6 +129,15 @@ impl AppRoot {
             let user = this.user_input.read(cx).value().to_string();
             let password = this.password_input.read(cx).value().to_string();
             let database = this.db_input.read(cx).value().to_string();
+
+            // Build a saved-connection entry for auto-save on success.
+            let conn_to_save = connections::SavedConnection {
+                name: format!("{user}@{host}/{database}"),
+                host: host.clone(),
+                port: port.clone(),
+                user: user.clone(),
+                database: database.clone(),
+            };
 
             this.state.connection_status = ConnectionStatus::Connecting;
             this.state.connection_error = None;
@@ -121,6 +168,8 @@ impl AppRoot {
                             }
                             model.state.driver = Some(driver);
                             model.state.connection_status = ConnectionStatus::Connected;
+                            // Auto-save the connection (upsert by name).
+                            connections::upsert(&mut model.saved_connections, conn_to_save);
                             cx.notify();
                         })
                         .ok();
@@ -183,6 +232,59 @@ impl AppRoot {
                                     .child("Connect to a database"),
                             ),
                     )
+                    // ── Saved connections (shown only when at least one exists)
+                    .when(!saved_conn_rows.is_empty(), |card| {
+                        card.child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap_1()
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(rgb(TEXT_SECONDARY))
+                                        .child("SAVED CONNECTIONS"),
+                                )
+                                .children(
+                                    saved_conn_rows
+                                        .into_iter()
+                                        .enumerate()
+                                        .map(|(i, (name, on_fill, on_delete))| {
+                                            div()
+                                                .id(("saved-conn", i))
+                                                .flex()
+                                                .flex_row()
+                                                .items_center()
+                                                .gap_2()
+                                                .px_3()
+                                                .py_2()
+                                                .rounded_md()
+                                                .border_1()
+                                                .border_color(rgb(BORDER))
+                                                .cursor_pointer()
+                                                .on_click(on_fill)
+                                                // Connection name (flex-1 so delete button stays right)
+                                                .child(
+                                                    div()
+                                                        .flex_1()
+                                                        .text_sm()
+                                                        .text_color(rgb(TEXT_PRIMARY))
+                                                        .child(name),
+                                                )
+                                                // Delete ×
+                                                .child(
+                                                    div()
+                                                        .id(("del-conn", i))
+                                                        .px_1()
+                                                        .text_xs()
+                                                        .text_color(rgb(TEXT_MUTED))
+                                                        .on_click(on_delete)
+                                                        .child("×"),
+                                                )
+                                        }),
+                                ),
+                        )
+                    })
                     // ── Host + Port row
                     .child(
                         div()
@@ -787,7 +889,15 @@ impl AppRoot {
 }
 
 impl Render for AppRoot {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Apply pending form-fill from a saved-connection click (needs window).
+        if let Some([host, port, user, db]) = self.pending_fill.take() {
+            self.host_input.update(cx, |s, cx| s.set_value(host, window, cx));
+            self.port_input.update(cx, |s, cx| s.set_value(port, window, cx));
+            self.user_input.update(cx, |s, cx| s.set_value(user, window, cx));
+            self.db_input.update(cx, |s, cx| s.set_value(db, window, cx));
+        }
+
         let root = div().flex().w_full().h_full().bg(rgb(BG_APP));
 
         match self.state.connection_status {
