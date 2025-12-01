@@ -422,6 +422,7 @@ impl AppRoot {
                         let all_loaded = td.rows.len() < CHUNK_SIZE;
                         this.state.results = Some(PagedTableData {
                             columns: td.columns,
+                            column_types: td.column_types,
                             query: browse_query,
                             rows: td.rows,
                             chunk_size: CHUNK_SIZE,
@@ -508,17 +509,22 @@ impl AppRoot {
                     "id".to_string(), "name".to_string(), "value".to_string(),
                     "status".to_string(), "created_at".to_string(),
                 ];
-                let rows: Vec<Vec<String>> = (0u64..100_000)
+                let column_types = vec![
+                    "int8".to_string(), "text".to_string(), "float8".to_string(),
+                    "text".to_string(), "date".to_string(),
+                ];
+                let rows: Vec<Vec<Option<String>>> = (0u64..100_000)
                     .map(|i| vec![
-                        i.to_string(),
-                        format!("Item {i}"),
-                        format!("{:.4}", i as f64 * 1.337),
-                        if i % 3 == 0 { "active" } else { "inactive" }.to_string(),
-                        format!("2024-{:02}-{:02}", (i % 12) + 1, (i % 28) + 1),
+                        Some(i.to_string()),
+                        if i % 50 == 0 { None } else { Some(format!("Item {i}")) },
+                        Some(format!("{:.4}", i as f64 * 1.337)),
+                        if i % 3 == 0 { Some("active".to_string()) } else { Some("inactive".to_string()) },
+                        Some(format!("2024-{:02}-{:02}", (i % 12) + 1, (i % 28) + 1)),
                     ])
                     .collect();
                 this.state.results = Some(PagedTableData {
                     columns,
+                    column_types,
                     query: String::new(),
                     rows: Arc::new(rows),
                     chunk_size: CHUNK_SIZE,
@@ -557,6 +563,7 @@ impl AppRoot {
                                 let all_loaded = data.rows.len() < CHUNK_SIZE;
                                 model.state.results = Some(PagedTableData {
                                     columns: data.columns,
+                                    column_types: data.column_types,
                                     query: trimmed_for_state,
                                     rows: data.rows,
                                     chunk_size: CHUNK_SIZE,
@@ -608,7 +615,7 @@ impl AppRoot {
 
         let query_error = self.state.query_error.clone();
         let results_snapshot = self.state.results.as_ref().map(|r| {
-            (r.columns.clone(), Arc::clone(&r.rows), r.loading_next, r.all_loaded)
+            (r.columns.clone(), r.column_types.clone(), Arc::clone(&r.rows), r.loading_next, r.all_loaded)
         });
 
         div()
@@ -703,8 +710,8 @@ impl AppRoot {
                     .text_sm()
                     .text_color(rgb(TEXT_SECONDARY))
                     .child("Running query…")
-            } else if let Some((columns, rows, loading_next, all_loaded)) = results_snapshot {
-                Self::render_data_grid(columns, rows, loading_next, all_loaded, &self.scroll_handle)
+            } else if let Some((columns, column_types, rows, loading_next, all_loaded)) = results_snapshot {
+                Self::render_data_grid(columns, column_types, rows, loading_next, all_loaded, &self.scroll_handle)
             } else {
                 div()
                     .flex_1()
@@ -779,7 +786,8 @@ impl AppRoot {
 
     fn render_data_grid(
         columns: Vec<String>,
-        rows: Arc<Vec<Vec<String>>>,
+        column_types: Vec<String>,
+        rows: Arc<Vec<Vec<Option<String>>>>,
         loading_next: bool,
         all_loaded: bool,
         scroll_handle: &UniformListScrollHandle,
@@ -788,6 +796,7 @@ impl AppRoot {
 
         // Arcs cloned once per render; the uniform_list closure holds them cheaply per frame.
         let cols_hdr = Arc::new(columns);
+        let types_hdr = Arc::new(column_types);
         let cols_list = Arc::clone(&cols_hdr);
         let rows_list = Arc::clone(&rows);
 
@@ -802,23 +811,37 @@ impl AppRoot {
                     .flex()
                     .flex_row()
                     .flex_shrink_0()
-                    .h(px(ROW_H))
+                    .h(px(48.0))
                     .bg(rgb(BG_HEADER))
                     .border_b_1()
                     .border_color(rgb(BORDER))
-                    .children(cols_hdr.iter().map(|col| {
+                    .children(cols_hdr.iter().enumerate().map(|(i, col)| {
+                        let type_label = types_hdr.get(i).cloned().unwrap_or_default();
                         div()
                             .w(px(CELL_W))
                             .flex_shrink_0()
                             .h_full()
                             .flex()
-                            .items_center()
+                            .flex_col()
+                            .justify_center()
                             .px_3()
+                            .gap_0p5()
                             .border_r_1()
                             .border_color(rgb(BORDER))
-                            .text_xs()
-                            .text_color(rgb(TEXT_SECONDARY))
-                            .child(col.to_uppercase())
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(TEXT_SECONDARY))
+                                    .child(col.to_uppercase()),
+                            )
+                            .when(!type_label.is_empty(), |el| {
+                                el.child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(rgb(TEXT_MUTED))
+                                        .child(type_label),
+                                )
+                            })
                     })),
             )
             // ── Virtual body: uniform_list only instantiates visible rows each frame
@@ -841,8 +864,8 @@ impl AppRoot {
                                     .border_color(rgb(BORDER))
                                     .when(is_alt, |el| el.bg(rgb(BG_HEADER)))
                                     .children((0..cols.len()).map(|c| {
-                                        let cell: String =
-                                            rows[i].get(c).cloned().unwrap_or_default();
+                                        let cell = rows[i].get(c).and_then(|v| v.as_deref());
+                                        let is_null = cell.is_none();
                                         div()
                                             .w(px(CELL_W))
                                             .flex_shrink_0()
@@ -853,8 +876,14 @@ impl AppRoot {
                                             .border_r_1()
                                             .border_color(rgb(BORDER))
                                             .text_sm()
-                                            .text_color(rgb(TEXT_PRIMARY))
-                                            .child(cell)
+                                            .when(is_null, |el| {
+                                                el.text_color(rgb(TEXT_MUTED))
+                                                    .child("NULL")
+                                            })
+                                            .when(!is_null, |el| {
+                                                el.text_color(rgb(TEXT_PRIMARY))
+                                                    .child(cell.unwrap_or_default().to_string())
+                                            })
                                     }))
                             })
                             .collect()

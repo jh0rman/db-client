@@ -54,10 +54,11 @@ impl DbDriver for MockDriver {
         use crate::state::TableData;
         Ok(TableData {
             columns: vec!["id".to_string(), "name".to_string(), "status".to_string()],
+            column_types: vec!["int4".to_string(), "text".to_string(), "text".to_string()],
             rows: Arc::new(vec![
-                vec!["1".to_string(), "Alice".to_string(), "active".to_string()],
-                vec!["2".to_string(), "Bob".to_string(), "inactive".to_string()],
-                vec!["3".to_string(), "Carol".to_string(), "active".to_string()],
+                vec![Some("1".to_string()), Some("Alice".to_string()), Some("active".to_string())],
+                vec![Some("2".to_string()), Some("Bob".to_string()), Some("inactive".to_string())],
+                vec![Some("3".to_string()), None, Some("active".to_string())],
             ]),
         })
     }
@@ -69,7 +70,7 @@ impl DbDriver for MockDriver {
         _limit: usize,
     ) -> Result<crate::state::TableData, DbError> {
         use crate::state::TableData;
-        Ok(TableData { columns: vec![], rows: Arc::new(vec![]) })
+        Ok(TableData { columns: vec![], column_types: vec![], rows: Arc::new(vec![]) })
     }
 }
 
@@ -125,6 +126,8 @@ pub fn get_table_data(db_path: &str, table: &str) -> Result<crate::state::TableD
 
     let col_count = stmt.column_count();
     let columns: Vec<String> = stmt.column_names().into_iter().map(str::to_string).collect();
+    // column_decltype feature is not enabled; leave types empty for SQLite.
+    let column_types: Vec<String> = vec![String::new(); col_count];
 
     let rows = stmt
         .query_map([], |row| {
@@ -133,17 +136,17 @@ pub fn get_table_data(db_path: &str, table: &str) -> Result<crate::state::TableD
                     use rusqlite::types::Value;
                     let val: Value = row.get(i)?;
                     Ok(match val {
-                        Value::Null => String::new(),
-                        Value::Integer(n) => n.to_string(),
-                        Value::Real(f) => format!("{:.4}", f),
-                        Value::Text(s) => s,
-                        Value::Blob(b) => format!("<blob {} bytes>", b.len()),
+                        Value::Null => None,
+                        Value::Integer(n) => Some(n.to_string()),
+                        Value::Real(f) => Some(format!("{:.4}", f)),
+                        Value::Text(s) => Some(s),
+                        Value::Blob(b) => Some(format!("<blob {} bytes>", b.len())),
                     })
                 })
-                .collect::<rusqlite::Result<Vec<String>>>()?;
+                .collect::<rusqlite::Result<Vec<Option<String>>>>()?;
             Ok(cells)
         })?
-        .collect::<Result<Vec<Vec<String>>, _>>()?;
+        .collect::<Result<Vec<Vec<Option<String>>>, _>>()?;
 
-    Ok(crate::state::TableData { columns, rows: Arc::new(rows) })
+    Ok(crate::state::TableData { columns, column_types, rows: Arc::new(rows) })
 }

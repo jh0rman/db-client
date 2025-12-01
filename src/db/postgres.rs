@@ -41,6 +41,7 @@ impl PostgresDriver {
         if rows.is_empty() {
             return Ok(TableData {
                 columns: vec![],
+                column_types: vec![],
                 rows: Arc::new(vec![]),
             });
         }
@@ -51,13 +52,20 @@ impl PostgresDriver {
             .map(|c| c.name().to_string())
             .collect();
 
-        let data_rows: Vec<Vec<String>> = rows
+        let column_types: Vec<String> = rows[0]
+            .columns()
             .iter()
-            .map(|row| (0..columns.len()).map(|i| pg_value_to_string(row, i)).collect())
+            .map(|c| c.type_().name().to_string())
+            .collect();
+
+        let data_rows: Vec<Vec<Option<String>>> = rows
+            .iter()
+            .map(|row| (0..columns.len()).map(|i| pg_value_to_cell(row, i)).collect())
             .collect();
 
         Ok(TableData {
             columns,
+            column_types,
             rows: Arc::new(data_rows),
         })
     }
@@ -110,51 +118,42 @@ impl DbDriver for PostgresDriver {
     }
 }
 
-/// Converts a single Postgres cell to a display string, handling common OIDs.
-fn pg_value_to_string(row: &postgres::Row, i: usize) -> String {
+/// Converts a single Postgres cell to an `Option<String>`.
+/// Returns `None` for SQL NULL regardless of type.
+fn pg_value_to_cell(row: &postgres::Row, i: usize) -> Option<String> {
     let type_name = row.columns()[i].type_().name();
     match type_name {
         "bool" => row
             .try_get::<_, Option<bool>>(i)
             .ok()
             .flatten()
-            .map(|v| v.to_string())
-            .unwrap_or_default(),
+            .map(|v| v.to_string()),
         "int2" => row
             .try_get::<_, Option<i16>>(i)
             .ok()
             .flatten()
-            .map(|v| v.to_string())
-            .unwrap_or_default(),
+            .map(|v| v.to_string()),
         "int4" | "oid" => row
             .try_get::<_, Option<i32>>(i)
             .ok()
             .flatten()
-            .map(|v| v.to_string())
-            .unwrap_or_default(),
+            .map(|v| v.to_string()),
         "int8" => row
             .try_get::<_, Option<i64>>(i)
             .ok()
             .flatten()
-            .map(|v| v.to_string())
-            .unwrap_or_default(),
+            .map(|v| v.to_string()),
         "float4" => row
             .try_get::<_, Option<f32>>(i)
             .ok()
             .flatten()
-            .map(|v| format!("{v}"))
-            .unwrap_or_default(),
+            .map(|v| format!("{v}")),
         "float8" => row
             .try_get::<_, Option<f64>>(i)
             .ok()
             .flatten()
-            .map(|v| format!("{v}"))
-            .unwrap_or_default(),
+            .map(|v| format!("{v}")),
         // text, varchar, bpchar, name, uuid, numeric (as text), json, etc.
-        _ => row
-            .try_get::<_, Option<String>>(i)
-            .ok()
-            .flatten()
-            .unwrap_or_default(),
+        _ => row.try_get::<_, Option<String>>(i).ok().flatten(),
     }
 }

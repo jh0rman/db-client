@@ -6,8 +6,10 @@ use crate::db::DbDriver;
 /// Flat result returned by the driver for a single query or page.
 pub struct TableData {
     pub columns: Vec<String>,
-    /// Wrapped in Arc so callers can hand it to the render closure cheaply.
-    pub rows: Arc<Vec<Vec<String>>>,
+    /// Postgres/SQLite type name per column (e.g. "int4", "text", "bool").
+    pub column_types: Vec<String>,
+    /// None = SQL NULL; Some(s) = cell value.
+    pub rows: Arc<Vec<Vec<Option<String>>>>,
 }
 
 // ─── Paged result (used by the UI) ───────────────────────────────────────────
@@ -15,10 +17,11 @@ pub struct TableData {
 /// All rows loaded so far for the active query, growing as the user scrolls.
 pub struct PagedTableData {
     pub columns: Vec<String>,
+    pub column_types: Vec<String>,
     /// The bare query (no LIMIT/OFFSET) used to fetch subsequent chunks.
     pub query: String,
-    /// Accumulated rows across all loaded chunks.
-    pub rows: Arc<Vec<Vec<String>>>,
+    /// Accumulated rows across all loaded chunks. None = SQL NULL.
+    pub rows: Arc<Vec<Vec<Option<String>>>>,
     pub chunk_size: usize,
     /// True when the last chunk came back with fewer rows than chunk_size.
     pub all_loaded: bool,
