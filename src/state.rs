@@ -38,20 +38,11 @@ pub enum ConnectionStatus {
     Connected,
 }
 
-pub struct ConnectionConfig {
-    pub host: String,
-    pub port: String,
-    pub user: String,
-    pub password: String,
-    pub database: String,
-}
-
 // ─── App state ────────────────────────────────────────────────────────────────
 
 pub struct AppState {
     pub connection_status: ConnectionStatus,
     pub driver: Option<Arc<dyn DbDriver>>,
-    pub sql_query: String,
     // Main view
     pub tables: Vec<String>,
     pub active_table: Option<String>,
@@ -66,7 +57,6 @@ impl AppState {
         Self {
             connection_status: ConnectionStatus::Disconnected,
             driver: None,
-            sql_query: String::new(),
             tables: Vec::new(),
             active_table: None,
             results: None,
