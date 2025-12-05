@@ -50,6 +50,8 @@ pub struct AppState {
     pub query_error: Option<String>,
     pub connection_error: Option<String>,
     pub query_in_progress: bool,
+    /// Whether the connection form is open in the right panel.
+    pub show_connection_form: bool,
 }
 
 impl AppState {
@@ -63,6 +65,7 @@ impl AppState {
             query_error: None,
             connection_error: None,
             query_in_progress: false,
+            show_connection_form: false,
         }
     }
 }

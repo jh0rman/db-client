@@ -22,6 +22,7 @@ actions!(db_client, [RunQuery]);
 pub struct AppRoot {
     state: AppState,
     // Connection form input states
+    name_input: gpui::Entity<InputState>,
     host_input: gpui::Entity<InputState>,
     port_input: gpui::Entity<InputState>,
     user_input: gpui::Entity<InputState>,
@@ -36,15 +37,16 @@ pub struct AppRoot {
     // Persisted connections
     conn_store: connections::ConnectionStore,
     // Set by "fill from saved connection" click; applied in render where window is available.
-    pending_fill: Option<[String; 4]>, // [host, port, user, database]
+    pending_fill: Option<[String; 5]>, // [name, host, port, user, database]
 }
 
 impl AppRoot {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let name_input = cx.new(|cx| InputState::new(window, cx).placeholder("My connection"));
         let host_input = cx.new(|cx| InputState::new(window, cx).default_value("localhost"));
         let port_input = cx.new(|cx| InputState::new(window, cx).default_value("5432"));
         let user_input = cx.new(|cx| InputState::new(window, cx).placeholder("postgres"));
-        let password_input = cx.new(|cx| InputState::new(window, cx).placeholder("password"));
+        let password_input = cx.new(|cx| InputState::new(window, cx).placeholder(""));
         let db_input = cx.new(|cx| InputState::new(window, cx).placeholder("mydb"));
         let sql_input = cx.new(|cx| {
             InputState::new(window, cx).placeholder("SELECT * FROM table LIMIT 100")
@@ -52,6 +54,7 @@ impl AppRoot {
 
         Self {
             state: AppState::new(),
+            name_input,
             host_input,
             port_input,
             user_input,
@@ -65,61 +68,139 @@ impl AppRoot {
         }
     }
 
-    // ── Connection screen ─────────────────────────────────────────────────────
+    // ── Home sidebar (disconnected state) ────────────────────────────────────
 
-    fn render_connection_screen(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        let is_connecting = self.state.connection_status == ConnectionStatus::Connecting;
-        let conn_error = self.state.connection_error.clone();
+    fn render_home_sidebar(&mut self, cx: &mut Context<Self>) -> gpui::Div {
+        let on_new_connection: ui::home_sidebar::ClickCb =
+            Box::new(cx.listener(|this, _: &ClickEvent, _, cx| {
+                this.state.show_connection_form = true;
+                this.state.connection_error = None;
+                cx.notify();
+            }));
 
-        // Build per-saved-connection fill+delete listeners before borrowing self further.
-        let saved_conn_rows: Vec<_> = self
+        let saved_conns: Vec<_> = self
             .conn_store
             .connections()
             .iter()
             .enumerate()
-            .map(|(idx, conn)| {
+            .map(|(_, conn)| {
                 let host = conn.host.clone();
                 let port = conn.port.clone();
                 let user = conn.user.clone();
                 let database = conn.database.clone();
                 let name = conn.name.clone();
+                let name_for_fill = name.clone();
 
-                let on_fill: ui::connection_screen::ClickCb =
+                let on_click: ui::home_sidebar::ClickCb =
                     Box::new(cx.listener(move |this, _: &ClickEvent, _, cx| {
                         this.pending_fill = Some([
+                            name_for_fill.clone(),
                             host.clone(),
                             port.clone(),
                             user.clone(),
                             database.clone(),
                         ]);
+                        this.state.show_connection_form = true;
+                        this.state.connection_error = None;
                         cx.notify();
                     }));
 
-                let on_delete: ui::connection_screen::ClickCb =
-                    Box::new(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                        this.conn_store.remove(idx);
-                        cx.notify();
-                    }));
-
-                (name, on_fill, on_delete)
+                (name, on_click)
             })
             .collect();
 
-        let on_connect: ui::connection_screen::ClickCb =
+        ui::home_sidebar::render(saved_conns, on_new_connection)
+    }
+
+    // ── Connection form (right panel when show_connection_form = true) ────────
+
+    fn render_connection_form(&mut self, cx: &mut Context<Self>) -> gpui::Div {
+        let is_connecting = self.state.connection_status == ConnectionStatus::Connecting;
+        let conn_error = self.state.connection_error.clone();
+
+        // Save: persist current form values without connecting.
+        let on_save: ui::connection_screen::ClickCb =
+            Box::new(cx.listener(|this, _: &ClickEvent, _, cx| {
+                let name = this.name_input.read(cx).value().to_string();
+                let host = this.host_input.read(cx).value().to_string();
+                let port = this.port_input.read(cx).value().to_string();
+                let user = this.user_input.read(cx).value().to_string();
+                let database = this.db_input.read(cx).value().to_string();
+                let name = if name.trim().is_empty() {
+                    format!("{user}@{host}/{database}")
+                } else {
+                    name
+                };
+                this.conn_store.upsert(connections::SavedConnection {
+                    name,
+                    host,
+                    port,
+                    user,
+                    database,
+                });
+                cx.notify();
+            }));
+
+        // Test: same as Connect but shows result without navigating.
+        let on_test: ui::connection_screen::ClickCb =
             Box::new(cx.listener(|this, _: &ClickEvent, _, cx| {
                 if this.state.connection_status == ConnectionStatus::Connecting {
                     return;
                 }
-                // Read form values before entering the async closure.
                 let host = this.host_input.read(cx).value().to_string();
                 let port = this.port_input.read(cx).value().to_string();
                 let user = this.user_input.read(cx).value().to_string();
                 let password = this.password_input.read(cx).value().to_string();
                 let database = this.db_input.read(cx).value().to_string();
 
-                // Build a saved-connection entry for auto-save on success.
+                this.state.connection_status = ConnectionStatus::Connecting;
+                this.state.connection_error = None;
+                cx.notify();
+
+                cx.spawn(async move |this_weak, async_cx| {
+                    let result = db::run_blocking(move || {
+                        db::postgres::PostgresDriver::connect(
+                            &host, &port, &user, &password, &database,
+                        )
+                        .map_err(|e| e.to_string())
+                    })
+                    .await;
+
+                    this_weak
+                        .update(async_cx, |model, cx| {
+                            model.state.connection_status = ConnectionStatus::Disconnected;
+                            model.state.connection_error = match result {
+                                Some(Ok(_)) => None, // success — no error shown
+                                Some(Err(e)) => Some(e),
+                                None => Some("Connection thread failed".to_string()),
+                            };
+                            cx.notify();
+                        })
+                        .ok();
+                })
+                .detach();
+            }));
+
+        // Connect: connect and navigate to main view.
+        let on_connect: ui::connection_screen::ClickCb =
+            Box::new(cx.listener(|this, _: &ClickEvent, _, cx| {
+                if this.state.connection_status == ConnectionStatus::Connecting {
+                    return;
+                }
+                let name = this.name_input.read(cx).value().to_string();
+                let host = this.host_input.read(cx).value().to_string();
+                let port = this.port_input.read(cx).value().to_string();
+                let user = this.user_input.read(cx).value().to_string();
+                let password = this.password_input.read(cx).value().to_string();
+                let database = this.db_input.read(cx).value().to_string();
+
+                let conn_name = if name.trim().is_empty() {
+                    format!("{user}@{host}/{database}")
+                } else {
+                    name
+                };
                 let conn_to_save = connections::SavedConnection {
-                    name: format!("{user}@{host}/{database}"),
+                    name: conn_name,
                     host: host.clone(),
                     port: port.clone(),
                     user: user.clone(),
@@ -154,7 +235,7 @@ impl AppRoot {
                                     }
                                     model.state.driver = Some(driver);
                                     model.state.connection_status = ConnectionStatus::Connected;
-                                    // Auto-save the connection (upsert by name).
+                                    model.state.show_connection_form = false;
                                     model.conn_store.upsert(conn_to_save);
                                     cx.notify();
                                 })
@@ -185,6 +266,7 @@ impl AppRoot {
             }));
 
         ui::connection_screen::render(
+            &self.name_input,
             &self.host_input,
             &self.port_input,
             &self.user_input,
@@ -192,9 +274,53 @@ impl AppRoot {
             &self.db_input,
             is_connecting,
             conn_error,
-            saved_conn_rows,
+            on_test,
+            on_save,
             on_connect,
         )
+    }
+
+    // ── Empty right panel ─────────────────────────────────────────────────────
+
+    fn render_empty_panel() -> gpui::Div {
+        div()
+            .flex_1()
+            .h_full()
+            .flex()
+            .justify_center()
+            .items_center()
+            .bg(rgb(ui::theme::BG_APP))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .gap_3()
+                    // Abstract watermark shape
+                    .child(
+                        div()
+                            .w(px(64.0))
+                            .h(px(64.0))
+                            .rounded(px(16.0))
+                            .bg(rgb(0x161b22))
+                            .border_1()
+                            .border_color(rgb(0x21262d))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(
+                                div()
+                                    .text_color(rgb(0x2d333b))
+                                    .child("db"),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(rgb(0x2d333b))
+                            .child("Select or create a connection"),
+                    ),
+            )
     }
 
     // ── Sidebar ───────────────────────────────────────────────────────────────
@@ -474,7 +600,8 @@ fn synthetic_stress_result() -> PagedTableData {
 impl Render for AppRoot {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Apply pending form-fill from a saved-connection click (needs window).
-        if let Some([host, port, user, db]) = self.pending_fill.take() {
+        if let Some([name, host, port, user, db]) = self.pending_fill.take() {
+            self.name_input.update(cx, |s, cx| s.set_value(name, window, cx));
             self.host_input.update(cx, |s, cx| s.set_value(host, window, cx));
             self.port_input.update(cx, |s, cx| s.set_value(port, window, cx));
             self.user_input.update(cx, |s, cx| s.set_value(user, window, cx));
@@ -492,7 +619,14 @@ impl Render for AppRoot {
 
         match self.state.connection_status {
             ConnectionStatus::Disconnected | ConnectionStatus::Connecting => {
-                root.child(self.render_connection_screen(cx))
+                let home_sidebar = self.render_home_sidebar(cx);
+                let right = if self.state.show_connection_form {
+                    let form = self.render_connection_form(cx);
+                    root.child(home_sidebar).child(form)
+                } else {
+                    root.child(home_sidebar).child(Self::render_empty_panel())
+                };
+                right
             }
             ConnectionStatus::Connected => {
                 let panel = self.render_main_panel(cx);
@@ -510,7 +644,7 @@ pub fn run() {
         gpui_component::init(cx);
         cx.bind_keys([KeyBinding::new("cmd-enter", RunQuery, None)]);
 
-        let bounds = Bounds::centered(None, size(px(1200.0), px(800.0)), cx);
+        let bounds = Bounds::centered(None, size(px(760.0), px(520.0)), cx);
         cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
