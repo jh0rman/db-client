@@ -39,6 +39,14 @@ impl ConnectionStore {
         self.persist();
     }
 
+    /// Replaces the connection at the given index in-place and persists.
+    pub fn update_at(&mut self, index: usize, conn: SavedConnection) {
+        if index < self.connections.len() {
+            self.connections[index] = conn;
+            self.persist();
+        }
+    }
+
     /// Removes the connection at the given index and persists.
     pub fn remove(&mut self, index: usize) {
         if index < self.connections.len() {

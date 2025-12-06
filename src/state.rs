@@ -52,6 +52,8 @@ pub struct AppState {
     pub query_in_progress: bool,
     /// Whether the connection form is open in the right panel.
     pub show_connection_form: bool,
+    /// Index of the selected saved connection, if any.
+    pub selected_conn_idx: Option<usize>,
 }
 
 impl AppState {
@@ -66,6 +68,7 @@ impl AppState {
             connection_error: None,
             query_in_progress: false,
             show_connection_form: false,
+            selected_conn_idx: None,
         }
     }
 }

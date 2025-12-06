@@ -5,6 +5,7 @@ pub type ClickCb = Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
 
 pub fn render(
     saved_conns: Vec<(String, ClickCb)>,
+    selected_idx: Option<usize>,
     on_new_connection: ClickCb,
 ) -> gpui::Div {
     div()
@@ -48,6 +49,7 @@ pub fn render(
                 .overflow_hidden()
                 .py_1()
                 .children(saved_conns.into_iter().enumerate().map(|(i, (name, on_click))| {
+                    let is_selected = selected_idx == Some(i);
                     div()
                         .id(("home-conn", i))
                         .flex()
@@ -60,7 +62,8 @@ pub fn render(
                         .rounded_md()
                         .cursor_pointer()
                         .text_sm()
-                        .text_color(rgb(TEXT_PRIMARY))
+                        .when(is_selected, |el| el.bg(rgb(ACCENT)).text_color(rgb(0xffffff)))
+                        .when(!is_selected, |el| el.text_color(rgb(TEXT_PRIMARY)))
                         .on_click(on_click)
                         // Postgres icon (colored square with "pg")
                         .child(

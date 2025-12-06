@@ -74,6 +74,7 @@ impl AppRoot {
         let on_new_connection: ui::home_sidebar::ClickCb =
             Box::new(cx.listener(|this, _: &ClickEvent, _, cx| {
                 this.state.show_connection_form = true;
+                this.state.selected_conn_idx = None;
                 this.state.connection_error = None;
                 cx.notify();
             }));
@@ -83,7 +84,7 @@ impl AppRoot {
             .connections()
             .iter()
             .enumerate()
-            .map(|(_, conn)| {
+            .map(|(idx, conn)| {
                 let host = conn.host.clone();
                 let port = conn.port.clone();
                 let user = conn.user.clone();
@@ -101,6 +102,7 @@ impl AppRoot {
                             database.clone(),
                         ]);
                         this.state.show_connection_form = true;
+                        this.state.selected_conn_idx = Some(idx);
                         this.state.connection_error = None;
                         cx.notify();
                     }));
@@ -109,7 +111,8 @@ impl AppRoot {
             })
             .collect();
 
-        ui::home_sidebar::render(saved_conns, on_new_connection)
+        let selected_idx = self.state.selected_conn_idx;
+        ui::home_sidebar::render(saved_conns, selected_idx, on_new_connection)
     }
 
     // ── Connection form (right panel when show_connection_form = true) ────────
@@ -118,7 +121,7 @@ impl AppRoot {
         let is_connecting = self.state.connection_status == ConnectionStatus::Connecting;
         let conn_error = self.state.connection_error.clone();
 
-        // Save: persist current form values without connecting.
+        // Save: if a connection is selected, update it in-place; otherwise upsert by name.
         let on_save: ui::connection_screen::ClickCb =
             Box::new(cx.listener(|this, _: &ClickEvent, _, cx| {
                 let name = this.name_input.read(cx).value().to_string();
@@ -131,13 +134,11 @@ impl AppRoot {
                 } else {
                     name
                 };
-                this.conn_store.upsert(connections::SavedConnection {
-                    name,
-                    host,
-                    port,
-                    user,
-                    database,
-                });
+                let conn = connections::SavedConnection { name, host, port, user, database };
+                match this.state.selected_conn_idx {
+                    Some(idx) => this.conn_store.update_at(idx, conn),
+                    None => this.conn_store.upsert(conn),
+                }
                 cx.notify();
             }));
 
