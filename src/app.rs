@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use gpui::{
     actions, div, prelude::*, px, rgb, size, App, Application, Bounds, ClickEvent,
-    Context, KeyBinding, TitlebarOptions, UniformListScrollHandle, Window, WindowBounds,
-    WindowOptions, point,
+    Context, KeyBinding, MouseButton, MouseDownEvent, TitlebarOptions,
+    UniformListScrollHandle, Window, WindowBounds, WindowOptions, point,
 };
 use gpui_component::{
     Root,
@@ -11,7 +11,7 @@ use gpui_component::{
 };
 use db::DbDriver;
 use state::{AppState, ConnectionStatus, PagedTableData};
-use ui::theme::CHUNK_SIZE;
+use ui::theme::{BG_CARD, BORDER, CHUNK_SIZE, TEXT_ERROR, TEXT_PRIMARY};
 
 use crate::{connections, db, state, ui};
 
@@ -38,6 +38,8 @@ pub struct AppRoot {
     conn_store: connections::ConnectionStore,
     // Set by "fill from saved connection" click; applied in render where window is available.
     pending_fill: Option<[String; 5]>, // [name, host, port, user, database]
+    // Connection index + cursor position for the right-click context menu.
+    context_menu_conn: Option<(usize, gpui::Point<gpui::Pixels>)>,
 }
 
 impl AppRoot {
@@ -65,6 +67,7 @@ impl AppRoot {
             scroll_handle: UniformListScrollHandle::new(),
             conn_store: connections::ConnectionStore::load(),
             pending_fill: None,
+            context_menu_conn: None,
         }
     }
 
@@ -104,10 +107,17 @@ impl AppRoot {
                         this.state.show_connection_form = true;
                         this.state.selected_conn_idx = Some(idx);
                         this.state.connection_error = None;
+                        this.context_menu_conn = None;
                         cx.notify();
                     }));
 
-                (name, on_click)
+                let on_right_click: ui::home_sidebar::RightClickCb =
+                    Box::new(cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                        this.context_menu_conn = Some((idx, event.position));
+                        cx.notify();
+                    }));
+
+                (name, on_click, on_right_click)
             })
             .collect();
 
@@ -609,31 +619,119 @@ impl Render for AppRoot {
             self.db_input.update(cx, |s, cx| s.set_value(db, window, cx));
         }
 
+        // Snapshot copy-able state before any borrows.
+        let context_menu = self.context_menu_conn;
+        let show_connection_form = self.state.show_connection_form;
+
         let on_run_action = cx.listener(|this, _: &RunQuery, _, cx| this.do_run(cx));
 
         let root = div()
+            .id("app-root")
             .flex()
             .w_full()
             .h_full()
             .bg(rgb(ui::theme::BG_APP))
             .on_action(on_run_action);
 
-        match self.state.connection_status {
+        let base = match self.state.connection_status {
             ConnectionStatus::Disconnected | ConnectionStatus::Connecting => {
                 let home_sidebar = self.render_home_sidebar(cx);
-                let right = if self.state.show_connection_form {
-                    let form = self.render_connection_form(cx);
-                    root.child(home_sidebar).child(form)
+                let right_panel: gpui::Div = if show_connection_form {
+                    self.render_connection_form(cx)
                 } else {
-                    root.child(home_sidebar).child(Self::render_empty_panel())
+                    Self::render_empty_panel()
                 };
-                right
+                root.child(home_sidebar).child(right_panel)
             }
             ConnectionStatus::Connected => {
                 let panel = self.render_main_panel(cx);
                 let sidebar = self.render_sidebar(cx);
                 root.child(sidebar).child(panel)
             }
+        };
+
+        // ── Context menu overlay (only in disconnected state)
+        //
+        // Timing contract:
+        //   • Menu items use on_mouse_down → fire immediately on press, before any other phase.
+        //   • Backdrop uses on_click (press + release) → only fires when the user completes a
+        //     click entirely on the backdrop, never while a menu item is being pressed.
+        if let Some((idx, pos)) = context_menu {
+            // Backdrop dismiss: on_click so it never fires while a menu item on_mouse_down is live.
+            let on_dismiss = cx.listener(|this, _: &ClickEvent, _, cx| {
+                this.context_menu_conn = None;
+                cx.notify();
+            });
+            // Actions: on_mouse_down so they fire before the backdrop can interfere.
+            let on_duplicate = cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                if let Some(conn) = this.conn_store.connections().get(idx).cloned() {
+                    let mut dup = conn;
+                    dup.name = format!("{} (copy)", dup.name);
+                    this.conn_store.upsert(dup);
+                }
+                this.context_menu_conn = None;
+                cx.notify();
+            });
+            let on_delete = cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                this.conn_store.remove(idx);
+                if this.state.selected_conn_idx == Some(idx) {
+                    this.state.selected_conn_idx = None;
+                    this.state.show_connection_form = false;
+                }
+                this.context_menu_conn = None;
+                cx.notify();
+            });
+
+            base
+                // Full-screen backdrop: dismiss on completed click outside the menu.
+                .child(
+                    div()
+                        .id("ctx-backdrop")
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .w_full()
+                        .h_full()
+                        .on_click(on_dismiss),
+                )
+                // Floating menu positioned at the cursor.
+                .child(
+                    div()
+                        .id("ctx-menu")
+                        .absolute()
+                        .left(pos.x)
+                        .top(pos.y)
+                        .w(px(160.0))
+                        .bg(rgb(BG_CARD))
+                        .border_1()
+                        .border_color(rgb(BORDER))
+                        .rounded_md()
+                        .py_1()
+                        .child(
+                            div()
+                                .id("ctx-duplicate")
+                                .px_3()
+                                .py(px(7.0))
+                                .cursor_pointer()
+                                .text_sm()
+                                .text_color(rgb(TEXT_PRIMARY))
+                                .on_mouse_down(MouseButton::Left, on_duplicate)
+                                .child("Duplicate"),
+                        )
+                        .child(
+                            div()
+                                .id("ctx-delete")
+                                .px_3()
+                                .py(px(7.0))
+                                .cursor_pointer()
+                                .text_sm()
+                                .text_color(rgb(TEXT_ERROR))
+                                .on_mouse_down(MouseButton::Left, on_delete)
+                                .child("Delete"),
+                        ),
+                )
+        } else {
+            base
         }
     }
 }
