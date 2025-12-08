@@ -40,6 +40,8 @@ pub struct AppRoot {
     pending_fill: Option<[String; 5]>, // [name, host, port, user, database]
     // Connection index + cursor position for the right-click context menu.
     context_menu_conn: Option<(usize, gpui::Point<gpui::Pixels>)>,
+    // Whether the "test connection succeeded" modal is visible.
+    show_test_success: bool,
 }
 
 impl AppRoot {
@@ -68,6 +70,7 @@ impl AppRoot {
             conn_store: connections::ConnectionStore::load(),
             pending_fill: None,
             context_menu_conn: None,
+            show_test_success: false,
         }
     }
 
@@ -180,11 +183,17 @@ impl AppRoot {
                     this_weak
                         .update(async_cx, |model, cx| {
                             model.state.connection_status = ConnectionStatus::Disconnected;
-                            model.state.connection_error = match result {
-                                Some(Ok(_)) => None, // success — no error shown
-                                Some(Err(e)) => Some(e),
-                                None => Some("Connection thread failed".to_string()),
-                            };
+                            match result {
+                                Some(Ok(_)) => {
+                                    model.state.connection_error = None;
+                                    model.show_test_success = true;
+                                }
+                                Some(Err(e)) => model.state.connection_error = Some(e),
+                                None => {
+                                    model.state.connection_error =
+                                        Some("Connection thread failed".to_string());
+                                }
+                            }
                             cx.notify();
                         })
                         .ok();
@@ -622,6 +631,7 @@ impl Render for AppRoot {
         // Snapshot copy-able state before any borrows.
         let context_menu = self.context_menu_conn;
         let show_connection_form = self.state.show_connection_form;
+        let show_test_success = self.show_test_success;
 
         let on_run_action = cx.listener(|this, _: &RunQuery, _, cx| this.do_run(cx));
 
@@ -656,7 +666,7 @@ impl Render for AppRoot {
         //   • Menu items use on_mouse_down → fire immediately on press, before any other phase.
         //   • Backdrop uses on_click (press + release) → only fires when the user completes a
         //     click entirely on the backdrop, never while a menu item is being pressed.
-        if let Some((idx, pos)) = context_menu {
+        let base = if let Some((idx, pos)) = context_menu {
             // Backdrop dismiss: on_click so it never fires while a menu item on_mouse_down is live.
             let on_dismiss = cx.listener(|this, _: &ClickEvent, _, cx| {
                 this.context_menu_conn = None;
@@ -732,8 +742,110 @@ impl Render for AppRoot {
                 )
         } else {
             base
+        };
+
+        // ── Test-success modal
+        if show_test_success {
+            let on_ok = cx.listener(|this, _: &ClickEvent, _, cx| {
+                this.show_test_success = false;
+                cx.notify();
+            });
+            with_test_success_modal(base, on_ok)
+        } else {
+            base
         }
     }
+}
+
+fn with_test_success_modal(
+    base: gpui::Stateful<gpui::Div>,
+    on_ok: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> gpui::Stateful<gpui::Div> {
+    use gpui::{px, rgb};
+    use crate::ui::theme::*;
+
+    base.child(
+        // Dark full-screen backdrop
+        div()
+            .id("test-modal-backdrop")
+            .absolute()
+            .top_0()
+            .left_0()
+            .w_full()
+            .h_full()
+            .bg(rgb(0x080b10))
+            .flex()
+            .justify_center()
+            .items_center()
+            .child(
+                // Modal card
+                div()
+                    .w(px(300.0))
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .gap_4()
+                    .p_8()
+                    .bg(rgb(BG_CARD))
+                    .border_1()
+                    .border_color(rgb(BORDER))
+                    .rounded_lg()
+                    // ── Green checkmark circle
+                    .child(
+                        div()
+                            .w(px(52.0))
+                            .h(px(52.0))
+                            .rounded(px(26.0))
+                            .bg(rgb(0x1a4731))
+                            .border_1()
+                            .border_color(rgb(0x2ea043))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .text_xl()
+                            .text_color(rgb(0x3fb950))
+                            .child("✓"),
+                    )
+                    // ── Message
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .items_center()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .text_color(rgb(TEXT_PRIMARY))
+                                    .child("Connection successful"),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(TEXT_SECONDARY))
+                                    .child("Your database is reachable"),
+                            ),
+                    )
+                    // ── OK button
+                    .child(
+                        div()
+                            .id("test-modal-ok")
+                            .mt_2()
+                            .px_8()
+                            .h(px(34.0))
+                            .flex()
+                            .items_center()
+                            .rounded_md()
+                            .cursor_pointer()
+                            .bg(rgb(ACCENT))
+                            .text_sm()
+                            .text_color(rgb(0xffffff))
+                            .on_click(on_ok)
+                            .child("OK"),
+                    ),
+            ),
+    )
 }
 
 // ─── Entry point ─────────────────────────────────────────────────────────────
