@@ -74,6 +74,19 @@ impl AppRoot {
         }
     }
 
+    fn new_connected(
+        driver: Arc<dyn DbDriver>,
+        tables: Vec<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let mut root = Self::new(window, cx);
+        root.state.connection_status = ConnectionStatus::Connected;
+        root.state.driver = Some(driver);
+        root.state.tables = tables;
+        root
+    }
+
     // ── Home sidebar (disconnected state) ────────────────────────────────────
 
     fn render_home_sidebar(&mut self, cx: &mut Context<Self>) -> gpui::Div {
@@ -203,7 +216,7 @@ impl AppRoot {
 
         // Connect: connect and navigate to main view.
         let on_connect: ui::connection_screen::ClickCb =
-            Box::new(cx.listener(|this, _: &ClickEvent, _, cx| {
+            Box::new(cx.listener(|this, _: &ClickEvent, window, cx| {
                 if this.state.connection_status == ConnectionStatus::Connecting {
                     return;
                 }
@@ -231,35 +244,56 @@ impl AppRoot {
                 this.state.connection_error = None;
                 cx.notify();
 
+                let win_handle = window.window_handle();
                 cx.spawn(async move |this_weak, async_cx| {
                     let result = db::run_blocking(move || {
-                        db::postgres::PostgresDriver::connect(
+                        let driver = db::postgres::PostgresDriver::connect(
                             &host, &port, &user, &password, &database,
                         )
-                        .map(|d| Arc::new(d) as Arc<dyn DbDriver>)
-                        .map_err(|e| e.to_string())
+                        .map_err(|e| e.to_string())?;
+                        let tables = driver.get_tables().map_err(|e| e.to_string())?;
+                        Ok::<_, String>((Arc::new(driver) as Arc<dyn DbDriver>, tables))
                     })
                     .await;
 
                     match result {
-                        Some(Ok(driver)) => {
+                        Some(Ok((driver, tables))) => {
+                            // Persist the connection to disk.
                             this_weak
-                                .update(async_cx, |model, cx| {
-                                    match driver.get_tables() {
-                                        Ok(tables) => model.state.tables = tables,
-                                        Err(e) => {
-                                            eprintln!("[db-client] get_tables error: {e}");
-                                            model.state.query_error =
-                                                Some(format!("get_tables: {e}"));
-                                        }
-                                    }
-                                    model.state.driver = Some(driver);
-                                    model.state.connection_status = ConnectionStatus::Connected;
-                                    model.state.show_connection_form = false;
+                                .update(async_cx, |model, _cx| {
                                     model.conn_store.upsert(conn_to_save);
-                                    cx.notify();
                                 })
                                 .ok();
+
+                            // Open a new centered window in the connected state.
+                            let new_bounds = async_cx
+                                .update(|cx| Bounds::centered(None, size(px(1200.0), px(760.0)), cx))
+                                .unwrap_or(Bounds {
+                                    origin: point(px(100.0), px(100.0)),
+                                    size: size(px(1200.0), px(760.0)),
+                                });
+                            let _ = async_cx.open_window(
+                                WindowOptions {
+                                    window_bounds: Some(WindowBounds::Windowed(new_bounds)),
+                                    titlebar: Some(TitlebarOptions {
+                                        title: None,
+                                        appears_transparent: true,
+                                        traffic_light_position: Some(point(px(12.0), px(12.0))),
+                                    }),
+                                    ..Default::default()
+                                },
+                                move |window, cx| {
+                                    let app_root = cx.new(|cx| {
+                                        AppRoot::new_connected(driver, tables, window, cx)
+                                    });
+                                    cx.new(|cx| Root::new(app_root, window, cx))
+                                },
+                            );
+
+                            // Close the home window.
+                            let _ = async_cx.update_window(win_handle, |_, window, _| {
+                                window.remove_window();
+                            });
                         }
                         Some(Err(err)) => {
                             this_weak
