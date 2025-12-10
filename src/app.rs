@@ -75,6 +75,7 @@ impl AppRoot {
     }
 
     fn new_connected(
+        conn_name: String,
         driver: Arc<dyn DbDriver>,
         tables: Vec<String>,
         window: &mut Window,
@@ -82,6 +83,7 @@ impl AppRoot {
     ) -> Self {
         let mut root = Self::new(window, cx);
         root.state.connection_status = ConnectionStatus::Connected;
+        root.state.active_connection_name = Some(conn_name);
         root.state.driver = Some(driver);
         root.state.tables = tables;
         root
@@ -233,7 +235,7 @@ impl AppRoot {
                     name
                 };
                 let conn_to_save = connections::SavedConnection {
-                    name: conn_name,
+                    name: conn_name.clone(),
                     host: host.clone(),
                     port: port.clone(),
                     user: user.clone(),
@@ -284,7 +286,7 @@ impl AppRoot {
                                 },
                                 move |window, cx| {
                                     let app_root = cx.new(|cx| {
-                                        AppRoot::new_connected(driver, tables, window, cx)
+                                        AppRoot::new_connected(conn_name, driver, tables, window, cx)
                                     });
                                     cx.new(|cx| Root::new(app_root, window, cx))
                                 },
@@ -412,6 +414,7 @@ impl AppRoot {
             .collect();
 
         ui::sidebar::render(
+            self.state.active_connection_name.clone().unwrap_or_default(),
             self.state.tables.clone(),
             self.state.active_table.clone(),
             on_table_clicks,

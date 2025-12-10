@@ -44,6 +44,7 @@ pub struct AppState {
     pub connection_status: ConnectionStatus,
     pub driver: Option<Arc<dyn DbDriver>>,
     // Main view
+    pub active_connection_name: Option<String>,
     pub tables: Vec<String>,
     pub active_table: Option<String>,
     pub results: Option<PagedTableData>,
@@ -61,6 +62,7 @@ impl AppState {
         Self {
             connection_status: ConnectionStatus::Disconnected,
             driver: None,
+            active_connection_name: None,
             tables: Vec::new(),
             active_table: None,
             results: None,
