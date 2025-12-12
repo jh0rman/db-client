@@ -1,4 +1,5 @@
 use gpui::{div, prelude::*, px, rgb, App, ClickEvent, Window};
+use gpui_component::scroll::ScrollableElement;
 use super::theme::*;
 
 pub type ClickCb = Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
@@ -130,7 +131,7 @@ pub fn render(
                         .flex_1()
                         .flex()
                         .flex_col()
-                        .overflow_hidden()
+                        .overflow_y_scrollbar()
                         .children(
                             tables
                                 .into_iter()

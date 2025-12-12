@@ -1,5 +1,6 @@
 use std::sync::Arc;
 use gpui::{div, uniform_list, prelude::*, px, rgb, UniformListScrollHandle};
+use gpui_component::scroll::Scrollbar;
 use super::theme::*;
 
 pub fn render_data_grid(
@@ -62,52 +63,65 @@ pub fn render_data_grid(
                         })
                 })),
         )
-        // ── Virtual body: uniform_list only instantiates visible rows each frame
+        // ── Virtual body: uniform_list + vertical scrollbar overlay
         .child(
-            uniform_list(
-                "grid-rows",
-                row_count,
-                move |visible_range, _window, _cx| {
-                    let rows = Arc::clone(&rows_list);
-                    let cols = Arc::clone(&cols_list);
-                    visible_range
-                        .map(|i| {
-                            let is_alt = i % 2 == 1;
-                            div()
-                                .flex()
-                                .flex_row()
-                                .flex_shrink_0()
-                                .h(px(ROW_H))
-                                .border_b_1()
-                                .border_color(rgb(BORDER))
-                                .when(is_alt, |el| el.bg(rgb(BG_HEADER)))
-                                .children((0..cols.len()).map(|c| {
-                                    let cell = rows[i].get(c).and_then(|v| v.as_deref());
-                                    let is_null = cell.is_none();
+            div()
+                .flex_1()
+                .relative()
+                .child(
+                    uniform_list(
+                        "grid-rows",
+                        row_count,
+                        move |visible_range, _window, _cx| {
+                            let rows = Arc::clone(&rows_list);
+                            let cols = Arc::clone(&cols_list);
+                            visible_range
+                                .map(|i| {
+                                    let is_alt = i % 2 == 1;
                                     div()
-                                        .w(px(CELL_W))
-                                        .flex_shrink_0()
-                                        .h_full()
                                         .flex()
-                                        .items_center()
-                                        .px_3()
-                                        .border_r_1()
+                                        .flex_row()
+                                        .flex_shrink_0()
+                                        .h(px(ROW_H))
+                                        .border_b_1()
                                         .border_color(rgb(BORDER))
-                                        .text_sm()
-                                        .when(is_null, |el| {
-                                            el.text_color(rgb(TEXT_MUTED)).child("NULL")
-                                        })
-                                        .when(!is_null, |el| {
-                                            el.text_color(rgb(TEXT_PRIMARY))
-                                                .child(cell.unwrap_or_default().to_string())
-                                        })
-                                }))
-                        })
-                        .collect()
-                },
-            )
-            .track_scroll(scroll_handle.clone())
-            .flex_1(),
+                                        .when(is_alt, |el| el.bg(rgb(BG_HEADER)))
+                                        .children((0..cols.len()).map(|c| {
+                                            let cell = rows[i].get(c).and_then(|v| v.as_deref());
+                                            let is_null = cell.is_none();
+                                            div()
+                                                .w(px(CELL_W))
+                                                .flex_shrink_0()
+                                                .h_full()
+                                                .flex()
+                                                .items_center()
+                                                .px_3()
+                                                .border_r_1()
+                                                .border_color(rgb(BORDER))
+                                                .text_sm()
+                                                .when(is_null, |el| {
+                                                    el.text_color(rgb(TEXT_MUTED)).child("NULL")
+                                                })
+                                                .when(!is_null, |el| {
+                                                    el.text_color(rgb(TEXT_PRIMARY))
+                                                        .child(cell.unwrap_or_default().to_string())
+                                                })
+                                        }))
+                                })
+                                .collect()
+                        },
+                    )
+                    .track_scroll(scroll_handle.clone())
+                    .h_full(),
+                )
+                .child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .right_0()
+                        .bottom_0()
+                        .child(Scrollbar::vertical(scroll_handle)),
+                ),
         )
         // ── Footer: row count + lazy-load status
         .child(
