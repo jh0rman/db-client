@@ -157,6 +157,7 @@ pub fn render(
                                             div()
                                                 .flex_1()
                                                 .overflow_hidden()
+                                                .truncate()
                                                 .text_sm()
                                                 .when(is_active, |el| {
                                                     el.text_color(rgb(ACCENT))
