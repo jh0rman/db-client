@@ -34,33 +34,25 @@ impl PostgresDriver {
     /// Shared inner query runner used by both public methods.
     fn run_query(&self, sql: &str) -> Result<TableData, DbError> {
         let mut client = self.client.lock().unwrap();
-        let rows = client
-            .query(sql, &[])
-            .map_err(|e| DbError(e.to_string()))?;
 
-        if rows.is_empty() {
-            return Ok(TableData {
-                columns: vec![],
-                column_types: vec![],
-                rows: Arc::new(vec![]),
-            });
-        }
+        // prepare() gives us column names + types without executing the query.
+        let stmt = client.prepare(sql).map_err(|e| DbError(e.to_string()))?;
+        let columns: Vec<String> = stmt.columns().iter().map(|c| c.name().to_string()).collect();
+        let column_types: Vec<String> =
+            stmt.columns().iter().map(|c| c.type_().name().to_string()).collect();
 
-        let columns: Vec<String> = rows[0]
-            .columns()
-            .iter()
-            .map(|c| c.name().to_string())
-            .collect();
-
-        let column_types: Vec<String> = rows[0]
-            .columns()
-            .iter()
-            .map(|c| c.type_().name().to_string())
-            .collect();
-
-        let data_rows: Vec<Vec<Option<String>>> = rows
-            .iter()
-            .map(|row| (0..columns.len()).map(|i| pg_value_to_cell(row, i)).collect())
+        // simple_query returns every value as Option<&str> — works for all Postgres types.
+        let messages = client.simple_query(sql).map_err(|e| DbError(e.to_string()))?;
+        let col_count = columns.len();
+        let data_rows: Vec<Vec<Option<String>>> = messages
+            .into_iter()
+            .filter_map(|msg| {
+                if let postgres::SimpleQueryMessage::Row(row) = msg {
+                    Some((0..col_count).map(|i| row.get(i).map(str::to_string)).collect())
+                } else {
+                    None
+                }
+            })
             .collect();
 
         Ok(TableData {
@@ -118,42 +110,3 @@ impl DbDriver for PostgresDriver {
     }
 }
 
-/// Converts a single Postgres cell to an `Option<String>`.
-/// Returns `None` for SQL NULL regardless of type.
-fn pg_value_to_cell(row: &postgres::Row, i: usize) -> Option<String> {
-    let type_name = row.columns()[i].type_().name();
-    match type_name {
-        "bool" => row
-            .try_get::<_, Option<bool>>(i)
-            .ok()
-            .flatten()
-            .map(|v| v.to_string()),
-        "int2" => row
-            .try_get::<_, Option<i16>>(i)
-            .ok()
-            .flatten()
-            .map(|v| v.to_string()),
-        "int4" | "oid" => row
-            .try_get::<_, Option<i32>>(i)
-            .ok()
-            .flatten()
-            .map(|v| v.to_string()),
-        "int8" => row
-            .try_get::<_, Option<i64>>(i)
-            .ok()
-            .flatten()
-            .map(|v| v.to_string()),
-        "float4" => row
-            .try_get::<_, Option<f32>>(i)
-            .ok()
-            .flatten()
-            .map(|v| format!("{v}")),
-        "float8" => row
-            .try_get::<_, Option<f64>>(i)
-            .ok()
-            .flatten()
-            .map(|v| format!("{v}")),
-        // text, varchar, bpchar, name, uuid, numeric (as text), json, etc.
-        _ => row.try_get::<_, Option<String>>(i).ok().flatten(),
-    }
-}
