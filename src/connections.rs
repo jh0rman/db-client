@@ -1,13 +1,31 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum DbType {
+    Postgres,
+    Sqlite,
+}
+
+impl Default for DbType {
+    fn default() -> Self {
+        DbType::Postgres
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SavedConnection {
     pub name: String,
+    #[serde(default)]
+    pub db_type: DbType,
+    // PostgreSQL fields
     pub host: String,
     pub port: String,
     pub user: String,
     pub database: String,
+    // SQLite field
+    #[serde(default)]
+    pub path: String,
     // Password is intentionally omitted from persistence for security.
 }
 

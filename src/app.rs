@@ -12,6 +12,7 @@ use gpui_component::{
 use db::DbDriver;
 use state::{AppState, ConnectionStatus, PagedTableData};
 use ui::theme::{BG_CARD, BORDER, CHUNK_SIZE, TEXT_ERROR, TEXT_PRIMARY};
+use connections::{DbType, SavedConnection};
 
 use crate::{connections, db, state, ui};
 
@@ -36,8 +37,12 @@ pub struct AppRoot {
     scroll_handle: UniformListScrollHandle,
     // Persisted connections
     conn_store: connections::ConnectionStore,
+    // Selected DB type for the connection form
+    conn_db_type: DbType,
+    // SQLite file path input
+    path_input: gpui::Entity<InputState>,
     // Set by "fill from saved connection" click; applied in render where window is available.
-    pending_fill: Option<[String; 5]>, // [name, host, port, user, database]
+    pending_fill: Option<SavedConnection>,
     // Connection index + cursor position for the right-click context menu.
     context_menu_conn: Option<(usize, gpui::Point<gpui::Pixels>)>,
     // Whether the "test connection succeeded" modal is visible.
@@ -55,6 +60,9 @@ impl AppRoot {
         let sql_input = cx.new(|cx| {
             InputState::new(window, cx).placeholder("SELECT * FROM table LIMIT 100")
         });
+        let path_input = cx.new(|cx| {
+            InputState::new(window, cx).placeholder("/path/to/database.db")
+        });
 
         Self {
             state: AppState::new(),
@@ -68,6 +76,8 @@ impl AppRoot {
             query_task: None,
             scroll_handle: UniformListScrollHandle::new(),
             conn_store: connections::ConnectionStore::load(),
+            conn_db_type: DbType::Postgres,
+            path_input,
             pending_fill: None,
             context_menu_conn: None,
             show_test_success: false,
@@ -106,22 +116,12 @@ impl AppRoot {
             .iter()
             .enumerate()
             .map(|(idx, conn)| {
-                let host = conn.host.clone();
-                let port = conn.port.clone();
-                let user = conn.user.clone();
-                let database = conn.database.clone();
+                let conn_clone = conn.clone();
                 let name = conn.name.clone();
-                let name_for_fill = name.clone();
 
                 let on_click: ui::home_sidebar::ClickCb =
                     Box::new(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                        this.pending_fill = Some([
-                            name_for_fill.clone(),
-                            host.clone(),
-                            port.clone(),
-                            user.clone(),
-                            database.clone(),
-                        ]);
+                        this.pending_fill = Some(conn_clone.clone());
                         this.state.show_connection_form = true;
                         this.state.selected_conn_idx = Some(idx);
                         this.state.connection_error = None;
@@ -149,20 +149,65 @@ impl AppRoot {
         let is_connecting = self.state.connection_status == ConnectionStatus::Connecting;
         let conn_error = self.state.connection_error.clone();
 
+        let on_postgres: ui::connection_screen::ClickCb =
+            Box::new(cx.listener(|this, _: &ClickEvent, _, cx| {
+                this.conn_db_type = DbType::Postgres;
+                cx.notify();
+            }));
+
+        let on_sqlite: ui::connection_screen::ClickCb =
+            Box::new(cx.listener(|this, _: &ClickEvent, _, cx| {
+                this.conn_db_type = DbType::Sqlite;
+                cx.notify();
+            }));
+
         // Save: if a connection is selected, update it in-place; otherwise upsert by name.
         let on_save: ui::connection_screen::ClickCb =
             Box::new(cx.listener(|this, _: &ClickEvent, _, cx| {
                 let name = this.name_input.read(cx).value().to_string();
-                let host = this.host_input.read(cx).value().to_string();
-                let port = this.port_input.read(cx).value().to_string();
-                let user = this.user_input.read(cx).value().to_string();
-                let database = this.db_input.read(cx).value().to_string();
-                let name = if name.trim().is_empty() {
-                    format!("{user}@{host}/{database}")
-                } else {
-                    name
+                let conn = match this.conn_db_type {
+                    DbType::Sqlite => {
+                        let path = this.path_input.read(cx).value().to_string();
+                        let name = if name.trim().is_empty() {
+                            std::path::Path::new(&path)
+                                .file_name()
+                                .and_then(|n| n.to_str())
+                                .unwrap_or("sqlite")
+                                .to_string()
+                        } else {
+                            name
+                        };
+                        SavedConnection {
+                            name,
+                            db_type: DbType::Sqlite,
+                            host: String::new(),
+                            port: String::new(),
+                            user: String::new(),
+                            database: String::new(),
+                            path,
+                        }
+                    }
+                    DbType::Postgres => {
+                        let host = this.host_input.read(cx).value().to_string();
+                        let port = this.port_input.read(cx).value().to_string();
+                        let user = this.user_input.read(cx).value().to_string();
+                        let database = this.db_input.read(cx).value().to_string();
+                        let name = if name.trim().is_empty() {
+                            format!("{user}@{host}/{database}")
+                        } else {
+                            name
+                        };
+                        SavedConnection {
+                            name,
+                            db_type: DbType::Postgres,
+                            host,
+                            port,
+                            user,
+                            database,
+                            path: String::new(),
+                        }
+                    }
                 };
-                let conn = connections::SavedConnection { name, host, port, user, database };
                 match this.state.selected_conn_idx {
                     Some(idx) => this.conn_store.update_at(idx, conn),
                     None => this.conn_store.upsert(conn),
@@ -170,7 +215,7 @@ impl AppRoot {
                 cx.notify();
             }));
 
-        // Test: same as Connect but shows result without navigating.
+        // Test: same as Connect but shows result without navigating (Postgres only).
         let on_test: ui::connection_screen::ClickCb =
             Box::new(cx.listener(|this, _: &ClickEvent, _, cx| {
                 if this.state.connection_status == ConnectionStatus::Connecting {
@@ -223,51 +268,86 @@ impl AppRoot {
                     return;
                 }
                 let name = this.name_input.read(cx).value().to_string();
-                let host = this.host_input.read(cx).value().to_string();
-                let port = this.port_input.read(cx).value().to_string();
-                let user = this.user_input.read(cx).value().to_string();
-                let password = this.password_input.read(cx).value().to_string();
-                let database = this.db_input.read(cx).value().to_string();
 
-                let conn_name = if name.trim().is_empty() {
-                    format!("{user}@{host}/{database}")
-                } else {
-                    name
-                };
-                let conn_to_save = connections::SavedConnection {
-                    name: conn_name.clone(),
-                    host: host.clone(),
-                    port: port.clone(),
-                    user: user.clone(),
-                    database: database.clone(),
-                };
+                let (conn_to_save, connect_fn): (SavedConnection, Box<dyn FnOnce() -> Result<(Arc<dyn DbDriver>, Vec<String>), String> + Send>) =
+                    match this.conn_db_type {
+                        DbType::Sqlite => {
+                            let path = this.path_input.read(cx).value().to_string();
+                            let conn_name = if name.trim().is_empty() {
+                                std::path::Path::new(&path)
+                                    .file_name()
+                                    .and_then(|n| n.to_str())
+                                    .unwrap_or("sqlite")
+                                    .to_string()
+                            } else {
+                                name
+                            };
+                            let conn = SavedConnection {
+                                name: conn_name.clone(),
+                                db_type: DbType::Sqlite,
+                                host: String::new(),
+                                port: String::new(),
+                                user: String::new(),
+                                database: String::new(),
+                                path: path.clone(),
+                            };
+                            let f = Box::new(move || {
+                                let driver = db::sqlite::SqliteDriver::connect(&path)
+                                    .map_err(|e| e.to_string())?;
+                                let tables = driver.get_tables().map_err(|e| e.to_string())?;
+                                Ok((Arc::new(driver) as Arc<dyn DbDriver>, tables))
+                            });
+                            (conn, f)
+                        }
+                        DbType::Postgres => {
+                            let host = this.host_input.read(cx).value().to_string();
+                            let port = this.port_input.read(cx).value().to_string();
+                            let user = this.user_input.read(cx).value().to_string();
+                            let password = this.password_input.read(cx).value().to_string();
+                            let database = this.db_input.read(cx).value().to_string();
+                            let conn_name = if name.trim().is_empty() {
+                                format!("{user}@{host}/{database}")
+                            } else {
+                                name
+                            };
+                            let conn = SavedConnection {
+                                name: conn_name.clone(),
+                                db_type: DbType::Postgres,
+                                host: host.clone(),
+                                port: port.clone(),
+                                user: user.clone(),
+                                database: database.clone(),
+                                path: String::new(),
+                            };
+                            let f = Box::new(move || {
+                                let driver = db::postgres::PostgresDriver::connect(
+                                    &host, &port, &user, &password, &database,
+                                )
+                                .map_err(|e| e.to_string())?;
+                                let tables = driver.get_tables().map_err(|e| e.to_string())?;
+                                Ok((Arc::new(driver) as Arc<dyn DbDriver>, tables))
+                            });
+                            (conn, f)
+                        }
+                    };
 
+                let conn_name = conn_to_save.name.clone();
                 this.state.connection_status = ConnectionStatus::Connecting;
                 this.state.connection_error = None;
                 cx.notify();
 
                 let win_handle = window.window_handle();
                 cx.spawn(async move |this_weak, async_cx| {
-                    let result = db::run_blocking(move || {
-                        let driver = db::postgres::PostgresDriver::connect(
-                            &host, &port, &user, &password, &database,
-                        )
-                        .map_err(|e| e.to_string())?;
-                        let tables = driver.get_tables().map_err(|e| e.to_string())?;
-                        Ok::<_, String>((Arc::new(driver) as Arc<dyn DbDriver>, tables))
-                    })
-                    .await;
+                    let result = db::run_blocking(connect_fn).await;
 
                     match result {
                         Some(Ok((driver, tables))) => {
-                            // Persist the connection to disk.
                             this_weak
                                 .update(async_cx, |model, _cx| {
                                     model.conn_store.upsert(conn_to_save);
                                 })
                                 .ok();
 
-                            // Open a new centered window in the connected state.
                             let new_bounds = async_cx
                                 .update(|cx| Bounds::centered(None, size(px(1200.0), px(760.0)), cx))
                                 .unwrap_or(Bounds {
@@ -292,7 +372,6 @@ impl AppRoot {
                                 },
                             );
 
-                            // Close the home window.
                             let _ = async_cx.update_window(win_handle, |_, window, _| {
                                 window.remove_window();
                             });
@@ -322,14 +401,18 @@ impl AppRoot {
             }));
 
         ui::connection_screen::render(
+            &self.conn_db_type,
             &self.name_input,
             &self.host_input,
             &self.port_input,
             &self.user_input,
             &self.password_input,
             &self.db_input,
+            &self.path_input,
             is_connecting,
             conn_error,
+            on_postgres,
+            on_sqlite,
             on_test,
             on_save,
             on_connect,
@@ -657,12 +740,20 @@ fn synthetic_stress_result() -> PagedTableData {
 impl Render for AppRoot {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Apply pending form-fill from a saved-connection click (needs window).
-        if let Some([name, host, port, user, db]) = self.pending_fill.take() {
-            self.name_input.update(cx, |s, cx| s.set_value(name, window, cx));
-            self.host_input.update(cx, |s, cx| s.set_value(host, window, cx));
-            self.port_input.update(cx, |s, cx| s.set_value(port, window, cx));
-            self.user_input.update(cx, |s, cx| s.set_value(user, window, cx));
-            self.db_input.update(cx, |s, cx| s.set_value(db, window, cx));
+        if let Some(conn) = self.pending_fill.take() {
+            self.conn_db_type = conn.db_type.clone();
+            self.name_input.update(cx, |s, cx| s.set_value(conn.name, window, cx));
+            match conn.db_type {
+                DbType::Sqlite => {
+                    self.path_input.update(cx, |s, cx| s.set_value(conn.path, window, cx));
+                }
+                DbType::Postgres => {
+                    self.host_input.update(cx, |s, cx| s.set_value(conn.host, window, cx));
+                    self.port_input.update(cx, |s, cx| s.set_value(conn.port, window, cx));
+                    self.user_input.update(cx, |s, cx| s.set_value(conn.user, window, cx));
+                    self.db_input.update(cx, |s, cx| s.set_value(conn.database, window, cx));
+                }
+            }
         }
 
         // Snapshot copy-able state before any borrows.
